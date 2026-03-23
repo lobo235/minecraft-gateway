@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.0.1] - 2026-03-23
+
+### Fixed
+
+- Use HTTPS for gateway URLs in deploy spec to match Traefik TLS termination
+
 ## [v1.0.0] - 2026-03-23
 
 ### Added
