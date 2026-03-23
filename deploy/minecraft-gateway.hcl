@@ -78,8 +78,8 @@ EOF
         LOG_LEVEL         = "info"
         NFS_BASE_PATH     = "/mnt/minecraft"
         DATA_DIR          = "/data"
-        NOMAD_GATEWAY_URL = "http://nomad-gateway.example.com"
-        VAULT_GATEWAY_URL = "http://vault-gateway.example.com"
+        NOMAD_GATEWAY_URL = "https://nomad-gateway.example.com"
+        VAULT_GATEWAY_URL = "https://vault-gateway.example.com"
       }
 
       resources {
