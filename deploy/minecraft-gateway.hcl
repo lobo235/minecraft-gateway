@@ -19,14 +19,14 @@ job "minecraft-gateway" {
         image = "ghcr.io/lobo235/minecraft-gateway:latest"
         ports = ["http"]
         volumes = [
-          "/mnt/data/minecraft:/mnt/data/minecraft",
-          "/mnt/data/homelab-ai/minecraft-gateway/data:/data",
+          "/path/to/minecraft:/mnt/minecraft",
+          "/path/to/data:/data",
         ]
       }
 
       env {
         PORT          = "${NOMAD_PORT_http}"
-        NFS_BASE_PATH = "/mnt/data/minecraft"
+        NFS_BASE_PATH = "/mnt/minecraft"
         DATA_DIR      = "/data"
       }
 

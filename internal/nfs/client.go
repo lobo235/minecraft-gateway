@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,9 @@ type BackupStatus struct {
 	BackupPath  string `json:"backup_path,omitempty"`
 	Error       string `json:"error,omitempty"`
 }
+
+// backupIDRegex validates backup IDs to prevent shell injection. IDs are timestamps like "2026-03-22T10-05-00".
+var backupIDRegex = regexp.MustCompile(`^[0-9T-]+$`)
 
 const (
 	maxFileReadSize = 1 << 20 // 1MB
@@ -348,33 +352,71 @@ func (c *client) StartBackup(serverName string) (string, error) {
 }
 
 func (c *client) runBackup(serverName, serverDir, backupFile, id string) {
-	// tar the server directory (excluding the backups subdirectory) and pipe through pzstd.
-	cmd := exec.Command("sh", "-c",
-		fmt.Sprintf("tar --exclude='%s' -cf - -C '%s' . | pzstd -o '%s'",
-			backupsDir, serverDir, backupFile))
+	// Pipe tar output through pzstd without using sh -c to avoid shell injection.
+	tarCmd := exec.Command("tar", "--exclude="+backupsDir, "-cf", "-", "-C", serverDir, ".")
+	pzstdCmd := exec.Command("pzstd", "-o", backupFile)
 
-	err := cmd.Run()
+	var err error
+	pzstdCmd.Stdin, err = tarCmd.StdoutPipe()
+	if err != nil {
+		c.log.Error("backup pipe setup failed", "server", serverName, "id", id, "error", err)
+		c.writeBackupStatusDirect(serverName, id, "failed", "", err.Error())
+		return
+	}
 
+	if err = pzstdCmd.Start(); err != nil {
+		c.log.Error("pzstd start failed", "server", serverName, "id", id, "error", err)
+		c.writeBackupStatusDirect(serverName, id, "failed", "", err.Error())
+		return
+	}
+
+	if err = tarCmd.Run(); err != nil {
+		c.log.Error("tar failed", "server", serverName, "id", id, "error", err)
+		_ = pzstdCmd.Wait()
+		c.writeBackupStatusDirect(serverName, id, "failed", "", err.Error())
+		return
+	}
+
+	if err = pzstdCmd.Wait(); err != nil {
+		c.log.Error("pzstd failed", "server", serverName, "id", id, "error", err)
+		c.writeBackupStatusDirect(serverName, id, "failed", "", err.Error())
+		return
+	}
+
+	c.log.Info("backup completed", "server", serverName, "id", id, "path", backupFile)
+	c.writeBackupStatusDirect(serverName, id, "done", backupFile, "")
+}
+
+// writeBackupStatusDirect writes backup status under the mutex without calling writeBackupStatus
+// to avoid deadlock when called from runBackup.
+func (c *client) writeBackupStatusDirect(serverName, id, statusStr, backupPath, errMsg string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if mkdirErr := os.MkdirAll(c.dataDir, 0755); mkdirErr != nil {
+		c.log.Error("create data dir failed", "error", mkdirErr)
+		return
+	}
 
 	status := &BackupStatus{
 		Server:      serverName,
 		ID:          id,
+		Status:      statusStr,
 		StartedAt:   time.Now().UTC().Format(time.RFC3339),
 		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+		BackupPath:  backupPath,
+		Error:       errMsg,
 	}
+
+	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
-		status.Status = "failed"
-		status.Error = err.Error()
-		c.log.Error("backup failed", "server", serverName, "id", id, "error", err)
-	} else {
-		status.Status = "done"
-		status.BackupPath = backupFile
-		c.log.Info("backup completed", "server", serverName, "id", id, "path", backupFile)
+		c.log.Error("marshal backup status failed", "error", err)
+		return
 	}
-	if writeErr := c.writeBackupStatus(serverName, status); writeErr != nil {
-		c.log.Error("failed to write backup status", "server", serverName, "error", writeErr)
+
+	statusFile := filepath.Join(c.dataDir, serverName+".backup-status")
+	if err := os.WriteFile(statusFile, data, 0644); err != nil {
+		c.log.Error("write backup status file failed", "error", err)
 	}
 }
 
@@ -400,6 +442,9 @@ func (c *client) GetBackupStatus(serverName, backupID string) (*BackupStatus, er
 
 // Restore extracts a backup archive into the server directory.
 func (c *client) Restore(serverName, backupID string) error {
+	if !backupIDRegex.MatchString(backupID) {
+		return fmt.Errorf("invalid backup ID: %s", backupID)
+	}
 	serverDir, err := c.SafePath(serverName)
 	if err != nil {
 		return err
@@ -412,12 +457,26 @@ func (c *client) Restore(serverName, backupID string) error {
 		return fmt.Errorf("backup not found: %s", backupID)
 	}
 
-	// Decompress and extract, excluding the backups directory itself.
-	cmd := exec.Command("sh", "-c",
-		fmt.Sprintf("pzstd -d '%s' --stdout | tar -xf - -C '%s' --exclude='%s'",
-			backupFile, serverDir, backupsDir))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("restore failed: %s: %w", string(out), err)
+	// Pipe pzstd output through tar without using sh -c to avoid shell injection.
+	pzstdCmd := exec.Command("pzstd", "-d", backupFile, "--stdout")
+	tarCmd := exec.Command("tar", "-xf", "-", "-C", serverDir, "--exclude="+backupsDir)
+
+	tarCmd.Stdin, err = pzstdCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("pipe setup: %w", err)
+	}
+
+	if err = tarCmd.Start(); err != nil {
+		return fmt.Errorf("tar start: %w", err)
+	}
+
+	if err = pzstdCmd.Run(); err != nil {
+		_ = tarCmd.Wait()
+		return fmt.Errorf("pzstd decompress: %w", err)
+	}
+
+	if err = tarCmd.Wait(); err != nil {
+		return fmt.Errorf("tar extract: %w", err)
 	}
 	return nil
 }
