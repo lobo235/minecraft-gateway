@@ -12,6 +12,7 @@ import (
 // NomadClient is the interface for resolving server allocations.
 type NomadClient interface {
 	GetAllocations(jobName string) ([]nomadgw.Allocation, error)
+	GetAllocation(jobName, allocID string) (*nomadgw.Allocation, error)
 }
 
 // VaultClient is the interface for retrieving RCON passwords.
@@ -63,18 +64,25 @@ func (c *client) Execute(serverName, command string) (string, error) {
 }
 
 // resolveRCON finds the RCON host and port from the running allocation.
+// The list endpoint may not include port mappings, so we fetch full alloc details.
 func (c *client) resolveRCON(serverName string) (string, int, error) {
 	allocs, err := c.nomad.GetAllocations(serverName)
 	if err != nil {
 		return "", 0, fmt.Errorf("get allocations: %w", err)
 	}
 
-	// Find a running allocation with an rcon port.
+	// Find a running allocation, then fetch its full details for port info.
 	for _, alloc := range allocs {
 		if alloc.Status != "running" {
 			continue
 		}
-		for _, port := range alloc.GetPorts() {
+		// Fetch full allocation details to get port mappings.
+		full, err := c.nomad.GetAllocation(serverName, alloc.ID)
+		if err != nil {
+			c.log.Warn("failed to get full allocation details", "alloc_id", alloc.ID, "error", err)
+			continue
+		}
+		for _, port := range full.GetPorts() {
 			if port.Label == "rcon" {
 				return port.HostIP, port.Value, nil
 			}

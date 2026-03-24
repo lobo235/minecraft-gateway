@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v1.0.3] - 2026-03-24
+## [v1.0.4] - 2026-03-24
 
 ### Fixed
+- RCON port discovery fetches full allocation details via `GetAllocation` instead of relying on list endpoint which omits port mappings
 - `SafePath` resolves symlinks via `filepath.EvalSymlinks` to prevent symlink escape attacks
 - `GrepFiles` uses 30-second timeout via `exec.CommandContext` to prevent DoS from pathological patterns
 - Remove phantom `rcon/client_test.go` reference from CLAUDE.md

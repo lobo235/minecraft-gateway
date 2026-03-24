@@ -11,8 +11,10 @@ import (
 
 // Client is the interface for communicating with nomad-gateway.
 type Client interface {
-	// GetAllocations retrieves allocations for a job, returning the RCON port and host.
+	// GetAllocations retrieves allocations for a job.
 	GetAllocations(jobName string) ([]Allocation, error)
+	// GetAllocation retrieves full details for a single allocation (includes port mappings).
+	GetAllocation(jobName, allocID string) (*Allocation, error)
 }
 
 // Allocation represents a Nomad allocation as returned by nomad-gateway.
@@ -98,4 +100,36 @@ func (c *client) GetAllocations(jobName string) ([]Allocation, error) {
 		return nil, fmt.Errorf("decode allocations: %w", err)
 	}
 	return allocs, nil
+}
+
+// GetAllocation calls GET /jobs/{jobName}/allocations/{allocID} on the nomad-gateway.
+// Returns the full allocation details including port mappings.
+func (c *client) GetAllocation(jobName, allocID string) (*Allocation, error) {
+	url := fmt.Sprintf("%s/jobs/%s/allocations/%s", c.baseURL, jobName, allocID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("nomad-gateway request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nomad-gateway returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var alloc Allocation
+	if err := json.Unmarshal(body, &alloc); err != nil {
+		return nil, fmt.Errorf("decode allocation: %w", err)
+	}
+	return &alloc, nil
 }
