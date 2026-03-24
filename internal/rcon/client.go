@@ -74,7 +74,7 @@ func (c *client) resolveRCON(serverName string) (string, int, error) {
 		if alloc.Status != "running" {
 			continue
 		}
-		for _, port := range alloc.Ports {
+		for _, port := range alloc.GetPorts() {
 			if port.Label == "rcon" {
 				return port.HostIP, port.Value, nil
 			}

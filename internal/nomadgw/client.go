@@ -15,12 +15,23 @@ type Client interface {
 	GetAllocations(jobName string) ([]Allocation, error)
 }
 
-// Allocation holds minimal allocation info needed for RCON resolution.
+// Allocation represents a Nomad allocation as returned by nomad-gateway.
+// Port data is nested under AllocatedResources.Shared.Ports (Nomad native format).
 type Allocation struct {
-	ID     string        `json:"ID"`
-	Status string        `json:"ClientStatus"`
-	Ports  []PortMapping `json:"AllocatedPorts"`
-	NodeID string        `json:"NodeID"`
+	ID                 string              `json:"ID"`
+	Status             string              `json:"ClientStatus"`
+	NodeID             string              `json:"NodeID"`
+	AllocatedResources *AllocatedResources `json:"AllocatedResources"`
+}
+
+// AllocatedResources contains the resources allocated to an allocation.
+type AllocatedResources struct {
+	Shared SharedResources `json:"Shared"`
+}
+
+// SharedResources contains shared allocation resources including ports.
+type SharedResources struct {
+	Ports []PortMapping `json:"Ports"`
 }
 
 // PortMapping represents a port mapping from a Nomad allocation.
@@ -29,6 +40,14 @@ type PortMapping struct {
 	Value  int    `json:"Value"`
 	To     int    `json:"To"`
 	HostIP string `json:"HostIP"`
+}
+
+// GetPorts returns the allocated ports, or nil if no resources are available.
+func (a *Allocation) GetPorts() []PortMapping {
+	if a.AllocatedResources == nil {
+		return nil
+	}
+	return a.AllocatedResources.Shared.Ports
 }
 
 type client struct {

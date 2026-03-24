@@ -14,9 +14,13 @@ func TestGetAllocations_Success(t *testing.T) {
 		{
 			ID:     "alloc-123",
 			Status: "running",
-			Ports: []PortMapping{
-				{Label: "minecraft", Value: 25565, To: 25565, HostIP: "10.0.0.1"},
-				{Label: "rcon", Value: 25575, To: 25575, HostIP: "10.0.0.1"},
+			AllocatedResources: &AllocatedResources{
+				Shared: SharedResources{
+					Ports: []PortMapping{
+						{Label: "minecraft", Value: 25565, To: 25565, HostIP: "10.0.0.1"},
+						{Label: "rcon", Value: 25575, To: 25575, HostIP: "10.0.0.1"},
+					},
+				},
 			},
 		},
 	}
@@ -46,8 +50,9 @@ func TestGetAllocations_Success(t *testing.T) {
 	if result[0].ID != "alloc-123" {
 		t.Errorf("alloc ID = %q, want alloc-123", result[0].ID)
 	}
-	if len(result[0].Ports) != 2 {
-		t.Errorf("expected 2 ports, got %d", len(result[0].Ports))
+	ports := result[0].GetPorts()
+	if len(ports) != 2 {
+		t.Errorf("expected 2 ports, got %d", len(ports))
 	}
 }
 
