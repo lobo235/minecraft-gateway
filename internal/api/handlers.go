@@ -4,10 +4,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/lobo235/minecraft-gateway/internal/nfs"
 )
+
+const (
+	maxJSONBodySize = 64 * 1024 // 64KB for most JSON request bodies
+)
+
+// limitBody wraps r.Body with http.MaxBytesReader to enforce a body size limit.
+func limitBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+}
 
 // --- Server management handlers ---
 
@@ -33,6 +43,7 @@ func (s *Server) createServerHandler() http.HandlerFunc {
 		GID  int    `json:"gid"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -104,6 +115,7 @@ func (s *Server) downloadHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -341,6 +353,7 @@ func (s *Server) restoreHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -377,6 +390,7 @@ func (s *Server) migrateHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -461,6 +475,7 @@ func (s *Server) writeFileHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, s.nfs.MaxWriteFileSize()+4096)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -499,6 +514,7 @@ func (s *Server) rconHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -532,6 +548,7 @@ func (s *Server) rconOpHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -561,6 +578,7 @@ func (s *Server) rconDeopHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -591,6 +609,7 @@ func (s *Server) rconWhitelistHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
+		limitBody(w, r, maxJSONBodySize)
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -632,5 +651,89 @@ func (s *Server) rconPlayersHandler() http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"response": resp})
+	}
+}
+
+// moveFileHandler handles POST /servers/{name}/files/move.
+func (s *Server) moveFileHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_name", "invalid server name")
+			return
+		}
+
+		limitBody(w, r, maxJSONBodySize)
+		var body struct {
+			SrcPath string `json:"src_path"`
+			DstPath string `json:"dst_path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+			return
+		}
+		if body.SrcPath == "" || body.DstPath == "" {
+			writeError(w, http.StatusBadRequest, "missing_param", "src_path and dst_path are required")
+			return
+		}
+
+		if err := s.nfs.MoveFile(name, body.SrcPath, body.DstPath); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, "not_found", err.Error())
+				return
+			}
+			if errors.Is(err, nfs.ErrPathTraversal) {
+				writeError(w, http.StatusBadRequest, "path_traversal", "path escapes server directory")
+				return
+			}
+			s.log.Error("move file failed", "server", name, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "failed to move file")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+// deleteFileHandler handles DELETE /servers/{name}/files/delete?path=...
+func (s *Server) deleteFileHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_name", "invalid server name")
+			return
+		}
+
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			writeError(w, http.StatusBadRequest, "missing_param", "path query parameter is required")
+			return
+		}
+
+		fullPath, err := s.nfs.SafePath(name, path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "path_traversal", "path escapes server directory")
+			return
+		}
+
+		// Prevent deletion of the server root directory.
+		serverRoot, _ := s.nfs.SafePath(name)
+		if fullPath == serverRoot {
+			writeError(w, http.StatusBadRequest, "invalid_path", "cannot delete server root directory")
+			return
+		}
+
+		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
+			writeError(w, http.StatusNotFound, "not_found", "file or directory not found")
+			return
+		}
+
+		if err := os.RemoveAll(fullPath); err != nil {
+			s.log.Error("delete file failed", "server", name, "path", path, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "failed to delete")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }

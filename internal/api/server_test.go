@@ -41,6 +41,7 @@ type mockNFS struct {
 	archiveEntries []nfs.ArchiveEntry
 	archiveErr     error
 	writeFileErr   error
+	moveFileErr    error
 }
 
 func (m *mockNFS) SafePath(parts ...string) (string, error) { return "", nil }
@@ -71,6 +72,10 @@ func (m *mockNFS) ListArchiveContents(string, string) ([]nfs.ArchiveEntry, error
 func (m *mockNFS) WriteFile(string, string, string, int, int) error {
 	return m.writeFileErr
 }
+func (m *mockNFS) MoveFile(string, string, string) error {
+	return m.moveFileErr
+}
+func (m *mockNFS) MaxWriteFileSize() int64 { return 1048576 }
 
 // --- Mock RCON client ---
 

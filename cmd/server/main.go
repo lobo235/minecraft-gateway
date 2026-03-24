@@ -44,7 +44,7 @@ func main() {
 
 	log.Info("starting minecraft-gateway", "version", version, "log_level", cfg.LogLevel)
 
-	nfsClient := nfs.NewClient(cfg.NFSBasePath, cfg.DataDir, log, cfg.MaxDownloadSize, cfg.MaxWriteFileSize)
+	nfsClient := nfs.NewClient(cfg.NFSBasePath, cfg.DataDir, log, cfg.MaxDownloadSize, cfg.MaxWriteFileSize, cfg.MaxExtractSize)
 	nomadClient := nomadgw.NewClient(cfg.NomadGatewayURL, cfg.NomadGatewayKey, log)
 	vaultClient := vaultgw.NewClient(cfg.VaultGatewayURL, cfg.VaultGatewayKey, log)
 	rconClient := rcon.NewClient(nomadClient, vaultClient, log)

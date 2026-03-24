@@ -102,6 +102,7 @@ All config via ENV vars. Loaded from `.env` in development (via `godotenv`; miss
 | `DATA_DIR` | no | `/data` | Directory for `.backup-status` tracking files |
 | `MAX_DOWNLOAD_SIZE` | no | `2147483648` | Max download size in bytes (2GB default) |
 | `MAX_WRITE_FILE_SIZE` | no | `1048576` | Max file write size in bytes (1MB default) |
+| `MAX_EXTRACT_SIZE` | no | `10737418240` | Max total extracted archive size in bytes (10GB default) |
 
 ## Architecture
 

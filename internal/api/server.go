@@ -59,6 +59,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /servers/{name}/files/read", auth(http.HandlerFunc(s.readFileHandler())))
 	mux.Handle("GET /servers/{name}/files/grep", auth(http.HandlerFunc(s.grepFilesHandler())))
 	mux.Handle("POST /servers/{name}/files/write", auth(http.HandlerFunc(s.writeFileHandler())))
+	mux.Handle("POST /servers/{name}/files/move", auth(http.HandlerFunc(s.moveFileHandler())))
+	mux.Handle("DELETE /servers/{name}/files/delete", auth(http.HandlerFunc(s.deleteFileHandler())))
 
 	// Backup operations.
 	mux.Handle("GET /servers/{name}/backups", auth(http.HandlerFunc(s.listBackupsHandler())))

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -56,6 +57,10 @@ type Client interface {
 	ListArchiveContents(serverName, path string) ([]ArchiveEntry, error)
 	// WriteFile writes content to a file on the server filesystem, creating parent dirs as needed.
 	WriteFile(serverName, path, content string, uid, gid int) error
+	// MoveFile moves/renames a file or directory within a server's filesystem.
+	MoveFile(serverName, srcPath, dstPath string) error
+	// MaxWriteFileSize returns the configured maximum write file size.
+	MaxWriteFileSize() int64
 }
 
 // FileEntry represents a file or directory in a listing.
@@ -136,9 +141,10 @@ const (
 	maxGrepBytes    = 5 * (1 << 20) // 5MB
 	backupsDir      = "backups"
 
-	maxDownloadSizeDefault  = 2 * (1 << 30) // 2GB
-	maxWriteFileSizeDefault = 1 << 20       // 1MB
-	downloadTimeout         = 10 * time.Minute
+	maxDownloadSizeDefault  int64 = 2 * (1 << 30) // 2GB
+	maxWriteFileSizeDefault int64 = 1 << 20       // 1MB
+	maxExtractSizeDefault   int64 = 10737418240   // 10GB
+	downloadTimeout               = 10 * time.Minute
 )
 
 type client struct {
@@ -148,15 +154,19 @@ type client struct {
 	mu               sync.Mutex // protects backup status file writes
 	maxDownloadSize  int64
 	maxWriteFileSize int64
+	maxExtractSize   int64
 }
 
 // NewClient creates a new NFS filesystem client.
-func NewClient(basePath, dataDir string, log *slog.Logger, maxDownloadSize, maxWriteFileSize int64) Client {
+func NewClient(basePath, dataDir string, log *slog.Logger, maxDownloadSize, maxWriteFileSize, maxExtractSize int64) Client {
 	if maxDownloadSize <= 0 {
 		maxDownloadSize = maxDownloadSizeDefault
 	}
 	if maxWriteFileSize <= 0 {
 		maxWriteFileSize = maxWriteFileSizeDefault
+	}
+	if maxExtractSize <= 0 {
+		maxExtractSize = maxExtractSizeDefault
 	}
 	return &client{
 		basePath:         basePath,
@@ -164,7 +174,13 @@ func NewClient(basePath, dataDir string, log *slog.Logger, maxDownloadSize, maxW
 		log:              log,
 		maxDownloadSize:  maxDownloadSize,
 		maxWriteFileSize: maxWriteFileSize,
+		maxExtractSize:   maxExtractSize,
 	}
+}
+
+// MaxWriteFileSize returns the configured maximum write file size.
+func (c *client) MaxWriteFileSize() int64 {
+	return c.maxWriteFileSize
 }
 
 // SafePath resolves path parts relative to basePath and verifies the result is within basePath.
@@ -597,10 +613,18 @@ func (c *client) writeBackupStatus(serverName string, status *BackupStatus) erro
 }
 
 // Download fetches a file from url into destPath within a server directory.
+// destPath is always treated as a directory (the downloaded file's name comes from the URL).
 func (c *client) Download(serverName, rawURL, destPath string, extract bool, uid, gid int, mode DownloadMode) (*DownloadResult, error) {
 	dest, err := c.SafePath(serverName, destPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// If destPath looks like a file (has a file extension), use the parent directory
+	// as the destination and ignore the filename — the actual filename comes from the URL.
+	ext := filepath.Ext(dest)
+	if ext != "" && ext != "." {
+		dest = filepath.Dir(dest)
 	}
 
 	// Handle clean_first mode: remove all contents in dest before downloading.
@@ -671,7 +695,21 @@ func (c *client) downloadFile(rawURL string, dst *os.File) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{
+		Timeout: downloadTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			host := req.URL.Hostname()
+			if isPrivateIP(host) {
+				return fmt.Errorf("redirect to private IP %s blocked", host)
+			}
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
@@ -691,6 +729,61 @@ func (c *client) downloadFile(rawURL string, dst *os.File) error {
 	}
 
 	return nil
+}
+
+// isPrivateIP checks if a hostname resolves to a private/loopback IP address.
+func isPrivateIP(host string) bool {
+	// Check for localhost explicitly.
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	// Check for metadata service IP.
+	if host == "169.254.169.254" {
+		return true
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// If we can't resolve, check if it's a raw IP.
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return false
+		}
+		ips = []net.IP{ip}
+	}
+
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{network: mustParseCIDR("127.0.0.0/8")},
+		{network: mustParseCIDR("10.0.0.0/8")},
+		{network: mustParseCIDR("172.16.0.0/12")},
+		{network: mustParseCIDR("192.168.0.0/16")},
+	}
+
+	for _, ip := range ips {
+		// Check IPv6 loopback.
+		if ip.IsLoopback() {
+			return true
+		}
+		for _, r := range privateRanges {
+			if r.network.Contains(ip) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// mustParseCIDR parses a CIDR string and panics on failure. Used for static initialization.
+func mustParseCIDR(s string) *net.IPNet {
+	_, network, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(fmt.Sprintf("invalid CIDR %q: %v", s, err))
+	}
+	return network
 }
 
 // filenameFromURL extracts the filename from a URL path.
@@ -752,18 +845,18 @@ func (c *client) extractArchive(tmpPath, destDir, rawURL string, mode DownloadMo
 
 	switch {
 	case strings.HasSuffix(filename, ".zip"):
-		return extractZip(tmpPath, destDir, mode)
+		return extractZip(tmpPath, destDir, mode, c.maxExtractSize)
 	case strings.HasSuffix(filename, ".tar.gz") || strings.HasSuffix(filename, ".tgz"):
-		return extractTarGz(tmpPath, destDir)
+		return extractTarGz(tmpPath, destDir, c.maxExtractSize)
 	case strings.HasSuffix(filename, ".tar.zst") || strings.HasSuffix(filename, ".tar.zstd"):
-		return extractTarZst(tmpPath, destDir)
+		return extractTarZst(tmpPath, destDir, c.maxExtractSize)
 	default:
 		return nil, fmt.Errorf("unsupported archive format: %s", filename)
 	}
 }
 
 // extractZip extracts a .zip archive to destDir using archive/zip stdlib.
-func extractZip(zipPath, destDir string, mode DownloadMode) (*DownloadResult, error) {
+func extractZip(zipPath, destDir string, mode DownloadMode, maxExtractSize int64) (*DownloadResult, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, fmt.Errorf("open zip: %w", err)
@@ -774,6 +867,11 @@ func extractZip(zipPath, destDir string, mode DownloadMode) (*DownloadResult, er
 	var totalBytes int64
 
 	for _, f := range r.File {
+		// Skip symlink entries.
+		if f.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+
 		// Prevent zip slip.
 		target := filepath.Join(destDir, f.Name)
 		rel, err := filepath.Rel(destDir, target)
@@ -820,13 +918,17 @@ func extractZip(zipPath, destDir string, mode DownloadMode) (*DownloadResult, er
 
 		filesCount++
 		totalBytes += n
+
+		if totalBytes > maxExtractSize {
+			return nil, fmt.Errorf("extracted size exceeds maximum of %d bytes", maxExtractSize)
+		}
 	}
 
 	return &DownloadResult{FilesCount: filesCount, TotalBytes: totalBytes}, nil
 }
 
-// extractTarGz extracts a .tar.gz archive to destDir using compress/gzip + tar command.
-func extractTarGz(tgzPath, destDir string) (*DownloadResult, error) {
+// extractTarGz extracts a .tar.gz archive to destDir using compress/gzip + archive/tar in Go.
+func extractTarGz(tgzPath, destDir string, maxExtractSize int64) (*DownloadResult, error) {
 	f, err := os.Open(tgzPath)
 	if err != nil {
 		return nil, fmt.Errorf("open tar.gz: %w", err)
@@ -839,78 +941,100 @@ func extractTarGz(tgzPath, destDir string) (*DownloadResult, error) {
 	}
 	defer func() { _ = gr.Close() }()
 
-	// Write decompressed tar to a temp file, then use tar to extract.
-	tmpTar, err := os.CreateTemp("", "mc-tar-*")
-	if err != nil {
-		return nil, fmt.Errorf("create temp tar: %w", err)
-	}
-	tmpTarPath := tmpTar.Name()
-	defer func() { _ = os.Remove(tmpTarPath) }()
+	// Limit the decompressed stream to prevent gzip bombs.
+	limited := io.LimitReader(gr, maxExtractSize+1)
 
-	if _, err := io.Copy(tmpTar, gr); err != nil {
-		_ = tmpTar.Close()
-		return nil, fmt.Errorf("decompress gzip: %w", err)
-	}
-	_ = tmpTar.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "tar", "-xf", tmpTarPath, "-C", destDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("tar extract: %w: %s", err, string(out))
-	}
-
-	return countFiles(destDir)
+	return extractTarReader(limited, destDir, maxExtractSize)
 }
 
-// extractTarZst extracts a .tar.zst archive to destDir using pzstd + tar.
-func extractTarZst(zstPath, destDir string) (*DownloadResult, error) {
+// extractTarZst extracts a .tar.zst archive to destDir using pzstd for decompression + archive/tar in Go.
+func extractTarZst(zstPath, destDir string, maxExtractSize int64) (*DownloadResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	pzstdCmd := exec.CommandContext(ctx, "pzstd", "-d", zstPath, "--stdout")
-	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", destDir)
-
-	var err error
-	tarCmd.Stdin, err = pzstdCmd.StdoutPipe()
+	stdout, err := pzstdCmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("pipe setup: %w", err)
+		return nil, fmt.Errorf("pzstd pipe: %w", err)
 	}
 
-	if err = tarCmd.Start(); err != nil {
-		return nil, fmt.Errorf("tar start: %w", err)
+	if err = pzstdCmd.Start(); err != nil {
+		return nil, fmt.Errorf("pzstd start: %w", err)
 	}
 
-	if err = pzstdCmd.Run(); err != nil {
-		_ = tarCmd.Wait()
+	result, tarErr := extractTarReader(stdout, destDir, maxExtractSize)
+
+	if err = pzstdCmd.Wait(); err != nil && tarErr == nil {
 		return nil, fmt.Errorf("pzstd decompress: %w", err)
 	}
-
-	if err = tarCmd.Wait(); err != nil {
-		return nil, fmt.Errorf("tar extract: %w", err)
+	if tarErr != nil {
+		return nil, tarErr
 	}
 
-	return countFiles(destDir)
+	return result, nil
 }
 
-// countFiles walks a directory and returns a count of files and total bytes.
-func countFiles(dir string) (*DownloadResult, error) {
+// extractTarReader extracts tar entries from r into destDir with path traversal and size limit checks.
+func extractTarReader(r io.Reader, destDir string, maxExtractSize int64) (*DownloadResult, error) {
+	tr := tar.NewReader(r)
 	var filesCount int
 	var totalBytes int64
 
-	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("read tar header: %w", err)
 		}
-		if !info.IsDir() {
+
+		// Skip symlinks and hard links.
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			continue
+		}
+
+		// Skip entries with absolute paths.
+		if filepath.IsAbs(hdr.Name) {
+			continue
+		}
+
+		// Validate the path stays within destDir.
+		target := filepath.Join(destDir, hdr.Name)
+		rel, err := filepath.Rel(destDir, target)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("tar entry %q escapes destination directory", hdr.Name)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return nil, fmt.Errorf("create dir %q: %w", hdr.Name, err)
+			}
+		case tar.TypeReg:
+			// Ensure parent directory exists.
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return nil, fmt.Errorf("create parent dir: %w", err)
+			}
+
+			out, err := os.Create(target)
+			if err != nil {
+				return nil, fmt.Errorf("create file %q: %w", hdr.Name, err)
+			}
+
+			n, copyErr := io.Copy(out, tr)
+			_ = out.Close()
+			if copyErr != nil {
+				return nil, fmt.Errorf("extract %q: %w", hdr.Name, copyErr)
+			}
+
 			filesCount++
-			totalBytes += info.Size()
+			totalBytes += n
+
+			if totalBytes > maxExtractSize {
+				return nil, fmt.Errorf("extracted size exceeds maximum of %d bytes", maxExtractSize)
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("count files: %w", err)
 	}
 
 	return &DownloadResult{FilesCount: filesCount, TotalBytes: totalBytes}, nil
@@ -1043,6 +1167,29 @@ func (c *client) WriteFile(serverName, filePath, content string, uid, gid int) e
 	}
 
 	return nil
+}
+
+// MoveFile moves/renames a file or directory within a server's filesystem.
+func (c *client) MoveFile(serverName, srcPath, dstPath string) error {
+	src, err := c.SafePath(serverName, srcPath)
+	if err != nil {
+		return err
+	}
+	dst, err := c.SafePath(serverName, dstPath)
+	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return fmt.Errorf("source not found: %s", srcPath)
+	}
+
+	// Create parent directory of destination.
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("create dest parent: %w", err)
+	}
+
+	return os.Rename(src, dst)
 }
 
 // chownRecursive sets ownership of all files and directories under root to uid:gid.

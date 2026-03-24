@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.1.1] - 2026-03-24
+
+### Fixed
+- Replace external `tar` command with Go `archive/tar` stdlib — prevents symlink escape attacks in tar archives
+- Add archive bomb protection: `MAX_EXTRACT_SIZE` env var (default 10GB) caps cumulative extracted bytes
+- Block deletion of server root directory via delete endpoint
+- Add `http.MaxBytesReader` on all JSON body handlers to prevent memory exhaustion
+- Skip symlink entries in zip extraction for defense in depth
+- Block HTTP redirects to private IP ranges (SSRF protection) during file downloads
+
+### Added
+- `POST /servers/{name}/files/move` — move/rename files within server filesystem
+- `DELETE /servers/{name}/files/delete` — delete files/directories from server filesystem
+- `MAX_EXTRACT_SIZE` env var (default 10GB)
+
 ## [v1.1.0] - 2026-03-24
 
 ### Added

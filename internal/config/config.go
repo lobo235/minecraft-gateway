@@ -21,6 +21,7 @@ type Config struct {
 	DataDir          string
 	MaxDownloadSize  int64
 	MaxWriteFileSize int64
+	MaxExtractSize   int64
 }
 
 // Load reads configuration from environment variables, applying defaults and validating required fields.
@@ -95,6 +96,18 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("MAX_WRITE_FILE_SIZE must be a positive integer")
 		}
 		cfg.MaxWriteFileSize = v
+	}
+
+	// Parse MAX_EXTRACT_SIZE (default 10GB).
+	maxES := os.Getenv("MAX_EXTRACT_SIZE")
+	if maxES == "" {
+		cfg.MaxExtractSize = 10737418240 // 10GB
+	} else {
+		v, err := strconv.ParseInt(maxES, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("MAX_EXTRACT_SIZE must be a positive integer")
+		}
+		cfg.MaxExtractSize = v
 	}
 
 	return cfg, nil

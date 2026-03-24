@@ -17,7 +17,7 @@ func newTestClient(t *testing.T) (*client, string) {
 	base := t.TempDir()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	dataDir := t.TempDir()
-	c := &client{basePath: base, dataDir: dataDir, log: log, maxDownloadSize: maxDownloadSizeDefault, maxWriteFileSize: maxWriteFileSizeDefault}
+	c := &client{basePath: base, dataDir: dataDir, log: log, maxDownloadSize: maxDownloadSizeDefault, maxWriteFileSize: maxWriteFileSizeDefault, maxExtractSize: maxExtractSizeDefault}
 	return c, base
 }
 
