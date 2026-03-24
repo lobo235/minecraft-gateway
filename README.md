@@ -47,10 +47,16 @@ All endpoints except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`
 | GET | `/servers` | List server directories |
 | POST | `/servers` | Create server directory |
 | DELETE | `/servers/{name}` | Delete server directory |
+| POST | `/servers/{name}/download` | Download file to server (async) |
+| GET | `/servers/{name}/downloads/{id}` | Download status |
+| GET | `/servers/{name}/archive-contents` | List archive entries |
 | GET | `/servers/{name}/disk-usage` | Disk usage |
 | GET | `/servers/{name}/files` | List files |
 | GET | `/servers/{name}/files/read` | Read file |
 | GET | `/servers/{name}/files/grep` | Grep files |
+| POST | `/servers/{name}/files/write` | Write file |
+| POST | `/servers/{name}/files/move` | Move/rename file |
+| DELETE | `/servers/{name}/files/delete` | Delete file/directory |
 | GET | `/servers/{name}/backups` | List backups |
 | POST | `/servers/{name}/backups` | Start backup (async) |
 | GET | `/servers/{name}/backups/{id}` | Backup status |
@@ -75,3 +81,6 @@ All endpoints except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`
 | `PORT` | No | `8080` | Listen port |
 | `LOG_LEVEL` | No | `info` | Log verbosity |
 | `DATA_DIR` | No | `/data` | Backup status file directory |
+| `MAX_DOWNLOAD_SIZE` | No | `2147483648` | Max download size in bytes (2GB) |
+| `MAX_WRITE_FILE_SIZE` | No | `1048576` | Max file write size in bytes (1MB) |
+| `MAX_EXTRACT_SIZE` | No | `10737418240` | Max extracted archive size in bytes (10GB) |
