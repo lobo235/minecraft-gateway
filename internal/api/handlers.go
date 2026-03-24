@@ -87,6 +87,64 @@ func (s *Server) deleteServerHandler() http.HandlerFunc {
 	}
 }
 
+// --- File download ---
+
+func (s *Server) downloadHandler() http.HandlerFunc {
+	type request struct {
+		URL      string `json:"url"`
+		DestPath string `json:"dest_path"`
+		Extract  bool   `json:"extract"`
+		UID      int    `json:"uid"`
+		GID      int    `json:"gid"`
+		Mode     string `json:"mode"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
+			return
+		}
+		var req request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+			return
+		}
+		if req.URL == "" {
+			writeError(w, http.StatusBadRequest, "missing_fields", "url is required")
+			return
+		}
+		if !validDownloadURL(req.URL) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "url domain is not allowed")
+			return
+		}
+		if req.DestPath == "" {
+			req.DestPath = "."
+		}
+		if req.Mode == "" {
+			req.Mode = "overwrite"
+		}
+		if !nfs.ValidDownloadMode(req.Mode) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "mode must be one of: overwrite, skip_existing, clean_first")
+			return
+		}
+		result, err := s.nfs.Download(name, req.URL, req.DestPath, req.Extract, req.UID, req.GID, nfs.DownloadMode(req.Mode))
+		if err != nil {
+			if errors.Is(err, nfs.ErrPathTraversal) {
+				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
+				return
+			}
+			s.log.Error("download failed", "error", err, "server", name, "trace_id", traceIDFromContext(r.Context()))
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to download file")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "ok",
+			"files_count": result.FilesCount,
+			"total_bytes": result.TotalBytes,
+		})
+	}
+}
+
 // --- Disk usage ---
 
 func (s *Server) diskUsageHandler() http.HandlerFunc {
@@ -350,6 +408,82 @@ func (s *Server) migrateHandler() http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"old_name": name, "new_name": req.NewName, "status": "migrated"})
+	}
+}
+
+// --- Archive contents ---
+
+func (s *Server) archiveContentsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
+			return
+		}
+		archivePath := r.URL.Query().Get("path")
+		if archivePath == "" {
+			writeError(w, http.StatusBadRequest, "missing_fields", "path query parameter is required")
+			return
+		}
+		entries, err := s.nfs.ListArchiveContents(name, archivePath)
+		if err != nil {
+			if errors.Is(err, nfs.ErrPathTraversal) {
+				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
+				return
+			}
+			if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, "not_found", "archive not found")
+				return
+			}
+			s.log.Error("list archive contents failed", "error", err, "server", name, "trace_id", traceIDFromContext(r.Context()))
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to list archive contents")
+			return
+		}
+		if entries == nil {
+			entries = []nfs.ArchiveEntry{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+	}
+}
+
+// --- Write file ---
+
+func (s *Server) writeFileHandler() http.HandlerFunc {
+	type request struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+		UID     int    `json:"uid"`
+		GID     int    `json:"gid"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
+			return
+		}
+		var req request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+			return
+		}
+		if req.Path == "" {
+			writeError(w, http.StatusBadRequest, "missing_fields", "path is required")
+			return
+		}
+		if err := s.nfs.WriteFile(name, req.Path, req.Content, req.UID, req.GID); err != nil {
+			if errors.Is(err, nfs.ErrPathTraversal) {
+				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
+				return
+			}
+			if strings.Contains(err.Error(), "exceeds maximum") {
+				writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+				return
+			}
+			s.log.Error("write file failed", "error", err, "server", name, "trace_id", traceIDFromContext(r.Context()))
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to write file")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": req.Path})
 	}
 }
 

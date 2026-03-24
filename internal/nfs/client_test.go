@@ -1,7 +1,11 @@
 package nfs
 
 import (
+	"archive/zip"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +17,7 @@ func newTestClient(t *testing.T) (*client, string) {
 	base := t.TempDir()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	dataDir := t.TempDir()
-	c := &client{basePath: base, dataDir: dataDir, log: log}
+	c := &client{basePath: base, dataDir: dataDir, log: log, maxDownloadSize: maxDownloadSizeDefault, maxWriteFileSize: maxWriteFileSizeDefault}
 	return c, base
 }
 
@@ -832,5 +836,473 @@ func TestRestore_ServerPathTraversal(t *testing.T) {
 	err := c.Restore("/etc", "2026-01-01T00-00-00")
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
+	}
+}
+
+// --- Download ---
+
+func TestDownload_PathTraversal(t *testing.T) {
+	c, _ := newTestClient(t)
+	_, err := c.Download("../escape", "https://example.com/file.zip", ".", false, 1000, 1000, ModeOverwrite)
+	if err != ErrPathTraversal {
+		t.Errorf("expected ErrPathTraversal, got %v", err)
+	}
+}
+
+func TestDownload_DestPathTraversal(t *testing.T) {
+	c, base := newTestClient(t)
+	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
+	_, err := c.Download("myserver", "https://example.com/file.zip", "../../escape", false, 1000, 1000, ModeOverwrite)
+	if err != ErrPathTraversal {
+		t.Errorf("expected ErrPathTraversal, got %v", err)
+	}
+}
+
+func TestDownload_NoExtract(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Set up a mock HTTP server to serve the file.
+	content := []byte("hello world file content")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", result.FilesCount)
+	}
+	if result.TotalBytes != int64(len(content)) {
+		t.Errorf("total_bytes = %d, want %d", result.TotalBytes, len(content))
+	}
+
+	// Verify the file was written.
+	downloaded := filepath.Join(serverDir, "testfile.jar")
+	data, err := os.ReadFile(downloaded)
+	if err != nil {
+		t.Fatalf("file not found: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Errorf("file content = %q, want %q", string(data), string(content))
+	}
+}
+
+func TestDownload_ExtractZip(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Create a zip file in memory.
+	zipPath := filepath.Join(t.TempDir(), "test.zip")
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	files := map[string]string{
+		"file1.txt":        "content one",
+		"subdir/file2.txt": "content two",
+	}
+	for name, content := range files {
+		fw, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprint(fw, content)
+	}
+	zw.Close()
+	zf.Close()
+
+	zipData, _ := os.ReadFile(zipPath)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(zipData)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FilesCount != 2 {
+		t.Errorf("files_count = %d, want 2", result.FilesCount)
+	}
+
+	// Verify files were extracted.
+	if _, err := os.Stat(filepath.Join(serverDir, "file1.txt")); err != nil {
+		t.Errorf("file1.txt not found: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(serverDir, "subdir", "file2.txt")); err != nil {
+		t.Errorf("subdir/file2.txt not found: %v", err)
+	}
+}
+
+func TestDownload_HTTPError(t *testing.T) {
+	c, base := newTestClient(t)
+	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	_, err := c.Download("myserver", ts.URL+"/missing.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err == nil {
+		t.Fatal("expected error for HTTP 404")
+	}
+}
+
+func TestDownload_UnsupportedArchive(t *testing.T) {
+	c, base := newTestClient(t)
+	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data"))
+	}))
+	defer ts.Close()
+
+	_, err := c.Download("myserver", ts.URL+"/file.rar", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err == nil {
+		t.Fatal("expected error for unsupported archive format")
+	}
+}
+
+func TestDownload_SubDestPath(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	content := []byte("plugin data")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/plugin.jar", "plugins", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", result.FilesCount)
+	}
+
+	// Verify the file was written to the subdirectory.
+	downloaded := filepath.Join(serverDir, "plugins", "plugin.jar")
+	if _, err := os.Stat(downloaded); err != nil {
+		t.Errorf("file not found at %s: %v", downloaded, err)
+	}
+}
+
+// --- filenameFromURL ---
+
+func TestFilenameFromURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://example.com/files/mod.jar", "mod.jar"},
+		{"https://example.com/files/mod.jar?v=1", "mod.jar"},
+		{"https://example.com/", "download"},
+		{"https://example.com", "download"},
+	}
+	for _, tt := range tests {
+		got := filenameFromURL(tt.url)
+		if got != tt.want {
+			t.Errorf("filenameFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+// --- chownRecursive ---
+
+func TestChownRecursive(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0755)
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+	os.WriteFile(filepath.Join(dir, "sub", "nested.txt"), []byte("nested"), 0644)
+
+	err := chownRecursive(dir, os.Getuid(), os.Getgid())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- Download modes ---
+
+func TestDownload_SkipExisting(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Pre-create a file that should be skipped.
+	os.WriteFile(filepath.Join(serverDir, "testfile.jar"), []byte("original"), 0644)
+
+	content := []byte("new content")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeSkipExisting)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FilesCount != 0 {
+		t.Errorf("files_count = %d, want 0 (skipped)", result.FilesCount)
+	}
+
+	// Verify original content was preserved.
+	data, _ := os.ReadFile(filepath.Join(serverDir, "testfile.jar"))
+	if string(data) != "original" {
+		t.Errorf("file was overwritten, content = %q", string(data))
+	}
+}
+
+func TestDownload_CleanFirst(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Pre-create files that should be cleaned.
+	os.WriteFile(filepath.Join(serverDir, "old-file.txt"), []byte("old"), 0644)
+	os.MkdirAll(filepath.Join(serverDir, "old-dir"), 0755)
+
+	content := []byte("new file content")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/newfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeCleanFirst)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", result.FilesCount)
+	}
+
+	// Verify old files were cleaned.
+	if _, err := os.Stat(filepath.Join(serverDir, "old-file.txt")); !os.IsNotExist(err) {
+		t.Error("old-file.txt should have been removed")
+	}
+	if _, err := os.Stat(filepath.Join(serverDir, "old-dir")); !os.IsNotExist(err) {
+		t.Error("old-dir should have been removed")
+	}
+
+	// Verify new file exists.
+	if _, err := os.Stat(filepath.Join(serverDir, "newfile.jar")); err != nil {
+		t.Errorf("newfile.jar not found: %v", err)
+	}
+}
+
+func TestDownload_SkipExisting_ExtractZip(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Pre-create one file that should be skipped.
+	os.WriteFile(filepath.Join(serverDir, "file1.txt"), []byte("original"), 0644)
+
+	// Create a zip file with two entries.
+	zipPath := filepath.Join(t.TempDir(), "test.zip")
+	zf, _ := os.Create(zipPath)
+	zw := zip.NewWriter(zf)
+	fw1, _ := zw.Create("file1.txt")
+	fmt.Fprint(fw1, "new content one")
+	fw2, _ := zw.Create("file2.txt")
+	fmt.Fprint(fw2, "content two")
+	zw.Close()
+	zf.Close()
+
+	zipData, _ := os.ReadFile(zipPath)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(zipData)
+	}))
+	defer ts.Close()
+
+	result, err := c.Download("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeSkipExisting)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Only file2.txt should be extracted (file1.txt was skipped).
+	if result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1 (file1.txt skipped)", result.FilesCount)
+	}
+
+	// Verify file1.txt was not overwritten.
+	data, _ := os.ReadFile(filepath.Join(serverDir, "file1.txt"))
+	if string(data) != "original" {
+		t.Errorf("file1.txt was overwritten, content = %q", string(data))
+	}
+	// Verify file2.txt was extracted.
+	if _, err := os.Stat(filepath.Join(serverDir, "file2.txt")); err != nil {
+		t.Errorf("file2.txt not found: %v", err)
+	}
+}
+
+// --- ValidDownloadMode ---
+
+func TestValidDownloadMode(t *testing.T) {
+	tests := []struct {
+		mode  string
+		valid bool
+	}{
+		{"overwrite", true},
+		{"skip_existing", true},
+		{"clean_first", true},
+		{"invalid", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := ValidDownloadMode(tt.mode); got != tt.valid {
+			t.Errorf("ValidDownloadMode(%q) = %v, want %v", tt.mode, got, tt.valid)
+		}
+	}
+}
+
+// --- ListArchiveContents ---
+
+func TestListArchiveContents_Zip(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	// Create a zip file.
+	zipPath := filepath.Join(serverDir, "test.zip")
+	zf, _ := os.Create(zipPath)
+	zw := zip.NewWriter(zf)
+	fw, _ := zw.Create("hello.txt")
+	fmt.Fprint(fw, "hello world")
+	zw.Close()
+	zf.Close()
+
+	entries, err := c.ListArchiveContents("myserver", "test.zip")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Name != "hello.txt" {
+		t.Errorf("name = %q, want hello.txt", entries[0].Name)
+	}
+	if entries[0].IsDir {
+		t.Error("expected file, got directory")
+	}
+}
+
+func TestListArchiveContents_PathTraversal(t *testing.T) {
+	c, _ := newTestClient(t)
+	_, err := c.ListArchiveContents("../escape", "test.zip")
+	if err != ErrPathTraversal {
+		t.Errorf("expected ErrPathTraversal, got %v", err)
+	}
+}
+
+func TestListArchiveContents_UnsupportedFormat(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+	os.WriteFile(filepath.Join(serverDir, "test.rar"), []byte("data"), 0644)
+
+	_, err := c.ListArchiveContents("myserver", "test.rar")
+	if err == nil {
+		t.Fatal("expected error for unsupported format")
+	}
+}
+
+func TestListArchiveContents_NotFound(t *testing.T) {
+	c, base := newTestClient(t)
+	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
+
+	_, err := c.ListArchiveContents("myserver", "missing.zip")
+	if err == nil {
+		t.Fatal("expected error for missing archive")
+	}
+}
+
+// --- WriteFile ---
+
+func TestWriteFile_Success(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	err := c.WriteFile("myserver", "server.properties", "motd=Hello", os.Getuid(), os.Getgid())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(serverDir, "server.properties"))
+	if err != nil {
+		t.Fatalf("file not found: %v", err)
+	}
+	if string(data) != "motd=Hello" {
+		t.Errorf("content = %q, want 'motd=Hello'", string(data))
+	}
+}
+
+func TestWriteFile_CreatesParentDirs(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+
+	err := c.WriteFile("myserver", "config/settings.yml", "key: value", os.Getuid(), os.Getgid())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(serverDir, "config", "settings.yml"))
+	if string(data) != "key: value" {
+		t.Errorf("content = %q, want 'key: value'", string(data))
+	}
+}
+
+func TestWriteFile_ExceedsMaxSize(t *testing.T) {
+	c, base := newTestClient(t)
+	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
+
+	// Create content larger than maxWriteFileSize.
+	bigContent := string(make([]byte, maxWriteFileSizeDefault+1))
+	err := c.WriteFile("myserver", "big.txt", bigContent, os.Getuid(), os.Getgid())
+	if err == nil {
+		t.Fatal("expected error for oversized content")
+	}
+}
+
+func TestWriteFile_PathTraversal(t *testing.T) {
+	c, _ := newTestClient(t)
+	err := c.WriteFile("../escape", "file.txt", "data", os.Getuid(), os.Getgid())
+	if err != ErrPathTraversal {
+		t.Errorf("expected ErrPathTraversal, got %v", err)
+	}
+}
+
+func TestWriteFile_OverwriteExisting(t *testing.T) {
+	c, base := newTestClient(t)
+	serverDir := filepath.Join(base, "myserver")
+	os.MkdirAll(serverDir, 0755)
+	os.WriteFile(filepath.Join(serverDir, "test.txt"), []byte("old"), 0644)
+
+	err := c.WriteFile("myserver", "test.txt", "new", os.Getuid(), os.Getgid())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(serverDir, "test.txt"))
+	if string(data) != "new" {
+		t.Errorf("content = %q, want 'new'", string(data))
 	}
 }

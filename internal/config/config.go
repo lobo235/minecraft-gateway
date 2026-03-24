@@ -3,21 +3,24 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	NFSBasePath     string
-	NomadGatewayURL string
-	NomadGatewayKey string
-	VaultGatewayURL string
-	VaultGatewayKey string
-	GatewayAPIKey   string
-	Port            string
-	LogLevel        string
-	DataDir         string
+	NFSBasePath      string
+	NomadGatewayURL  string
+	NomadGatewayKey  string
+	VaultGatewayURL  string
+	VaultGatewayKey  string
+	GatewayAPIKey    string
+	Port             string
+	LogLevel         string
+	DataDir          string
+	MaxDownloadSize  int64
+	MaxWriteFileSize int64
 }
 
 // Load reads configuration from environment variables, applying defaults and validating required fields.
@@ -68,6 +71,30 @@ func Load() (*Config, error) {
 		cfg.LogLevel = "info"
 	default:
 		return nil, fmt.Errorf("LOG_LEVEL must be one of: debug, info, warn, error")
+	}
+
+	// Parse MAX_DOWNLOAD_SIZE (default 2GB).
+	maxDL := os.Getenv("MAX_DOWNLOAD_SIZE")
+	if maxDL == "" {
+		cfg.MaxDownloadSize = 2147483648 // 2GB
+	} else {
+		v, err := strconv.ParseInt(maxDL, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("MAX_DOWNLOAD_SIZE must be a positive integer")
+		}
+		cfg.MaxDownloadSize = v
+	}
+
+	// Parse MAX_WRITE_FILE_SIZE (default 1MB).
+	maxWF := os.Getenv("MAX_WRITE_FILE_SIZE")
+	if maxWF == "" {
+		cfg.MaxWriteFileSize = 1048576 // 1MB
+	} else {
+		v, err := strconv.ParseInt(maxWF, 10, 64)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("MAX_WRITE_FILE_SIZE must be a positive integer")
+		}
+		cfg.MaxWriteFileSize = v
 	}
 
 	return cfg, nil

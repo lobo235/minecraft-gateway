@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.1.0] - 2026-03-24
+
+### Added
+- `POST /servers/{name}/download` — download files from CurseForge, Modrinth, FTB to server filesystem with optional extraction (zip, tar.gz, tar.zst)
+- `GET /servers/{name}/archive-contents` — list files inside zip/tar archives on server filesystem
+- `POST /servers/{name}/files/write` — write content to files on server filesystem
+- Download modes: `overwrite` (default), `skip_existing`, `clean_first`
+- URL allowlist: CurseForge CDN, Modrinth CDN, FTB domains
+- `MAX_DOWNLOAD_SIZE` env var (default 2GB) and `MAX_WRITE_FILE_SIZE` env var (default 1MB)
+
 ## [v1.0.4] - 2026-03-24
 
 ### Fixed

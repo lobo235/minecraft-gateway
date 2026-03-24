@@ -16,26 +16,31 @@ import (
 // --- Mock NFS client ---
 
 type mockNFS struct {
-	servers      []string
-	listErr      error
-	createErr    error
-	deleteErr    error
-	diskUsage    int64
-	diskUsageErr error
-	files        []nfs.FileEntry
-	listFilesErr error
-	fileContent  []byte
-	readFileErr  error
-	grepResult   *nfs.GrepResult
-	grepErr      error
-	backups      []nfs.BackupInfo
-	listBackErr  error
-	backupID     string
-	startBackErr error
-	backupStatus *nfs.BackupStatus
-	getStatusErr error
-	restoreErr   error
-	migrateErr   error
+	servers        []string
+	listErr        error
+	createErr      error
+	deleteErr      error
+	diskUsage      int64
+	diskUsageErr   error
+	files          []nfs.FileEntry
+	listFilesErr   error
+	fileContent    []byte
+	readFileErr    error
+	grepResult     *nfs.GrepResult
+	grepErr        error
+	backups        []nfs.BackupInfo
+	listBackErr    error
+	backupID       string
+	startBackErr   error
+	backupStatus   *nfs.BackupStatus
+	getStatusErr   error
+	restoreErr     error
+	migrateErr     error
+	downloadResult *nfs.DownloadResult
+	downloadErr    error
+	archiveEntries []nfs.ArchiveEntry
+	archiveErr     error
+	writeFileErr   error
 }
 
 func (m *mockNFS) SafePath(parts ...string) (string, error) { return "", nil }
@@ -57,6 +62,15 @@ func (m *mockNFS) GetBackupStatus(string, string) (*nfs.BackupStatus, error) {
 }
 func (m *mockNFS) Restore(string, string) error { return m.restoreErr }
 func (m *mockNFS) Migrate(string, string) error { return m.migrateErr }
+func (m *mockNFS) Download(string, string, string, bool, int, int, nfs.DownloadMode) (*nfs.DownloadResult, error) {
+	return m.downloadResult, m.downloadErr
+}
+func (m *mockNFS) ListArchiveContents(string, string) ([]nfs.ArchiveEntry, error) {
+	return m.archiveEntries, m.archiveErr
+}
+func (m *mockNFS) WriteFile(string, string, string, int, int) error {
+	return m.writeFileErr
+}
 
 // --- Mock RCON client ---
 
@@ -1033,6 +1047,347 @@ func TestNoBearerPrefix(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+// --- Download handler tests ---
+
+func TestDownloadHandler_Success(t *testing.T) {
+	mock := &mockNFS{
+		downloadResult: &nfs.DownloadResult{FilesCount: 3, TotalBytes: 12345},
+	}
+	s := newTestServer(mock, &mockRCON{})
+	body := map[string]any{
+		"url":       "https://edge.forgecdn.net/files/test.zip",
+		"dest_path": "mods",
+		"extract":   true,
+		"uid":       1001,
+		"gid":       1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+	if resp["files_count"] != float64(3) {
+		t.Errorf("files_count = %v, want 3", resp["files_count"])
+	}
+	if resp["total_bytes"] != float64(12345) {
+		t.Errorf("total_bytes = %v, want 12345", resp["total_bytes"])
+	}
+}
+
+func TestDownloadHandler_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{"url": "https://edge.forgecdn.net/files/test.zip"}
+	rr := doRequest(s.Handler(), "POST", "/servers/INVALID/download", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDownloadHandler_MissingURL(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{"dest_path": "mods"}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDownloadHandler_DisallowedURL(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{"url": "https://evil.com/malware.zip"}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+	var resp map[string]string
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["code"] != "invalid_body" {
+		t.Errorf("code = %q, want invalid_body", resp["code"])
+	}
+}
+
+func TestDownloadHandler_PathTraversal(t *testing.T) {
+	mock := &mockNFS{
+		downloadErr: nfs.ErrPathTraversal,
+	}
+	s := newTestServer(mock, &mockRCON{})
+	body := map[string]any{
+		"url":       "https://edge.forgecdn.net/files/test.zip",
+		"dest_path": "../../etc",
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDownloadHandler_InternalError(t *testing.T) {
+	mock := &mockNFS{
+		downloadErr: fmt.Errorf("download failed"),
+	}
+	s := newTestServer(mock, &mockRCON{})
+	body := map[string]any{
+		"url": "https://edge.forgecdn.net/files/test.zip",
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestDownloadHandler_InvalidJSON(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("POST", "/servers/myserver/download", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDownloadHandler_NoAuth(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequestNoAuth(s.Handler(), "POST", "/servers/myserver/download")
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestDownloadHandler_InvalidMode(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{
+		"url":  "https://edge.forgecdn.net/files/test.zip",
+		"mode": "invalid_mode",
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDownloadHandler_SkipExistingMode(t *testing.T) {
+	mock := &mockNFS{
+		downloadResult: &nfs.DownloadResult{FilesCount: 0, TotalBytes: 0},
+	}
+	s := newTestServer(mock, &mockRCON{})
+	body := map[string]any{
+		"url":  "https://edge.forgecdn.net/files/test.zip",
+		"mode": "skip_existing",
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestDownloadHandler_CleanFirstMode(t *testing.T) {
+	mock := &mockNFS{
+		downloadResult: &nfs.DownloadResult{FilesCount: 5, TotalBytes: 50000},
+	}
+	s := newTestServer(mock, &mockRCON{})
+	body := map[string]any{
+		"url":  "https://edge.forgecdn.net/files/test.zip",
+		"mode": "clean_first",
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+// --- Archive Contents handler tests ---
+
+func TestArchiveContentsHandler_Success(t *testing.T) {
+	entries := []nfs.ArchiveEntry{
+		{Name: "file1.txt", Size: 100, IsDir: false},
+		{Name: "subdir/", Size: 0, IsDir: true},
+	}
+	s := newTestServer(&mockNFS{archiveEntries: entries}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents?path=mods.zip", nil)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	var resp map[string][]nfs.ArchiveEntry
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if len(resp["entries"]) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(resp["entries"]))
+	}
+}
+
+func TestArchiveContentsHandler_MissingPath(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/INVALID/archive-contents?path=test.zip", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{archiveErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents?path=../../etc/passwd", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_NotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{archiveErr: fmt.Errorf("open zip: no such file or directory")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents?path=missing.zip", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{archiveErr: fmt.Errorf("corrupt archive")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents?path=bad.zip", nil)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_NilReturnsEmptyArray(t *testing.T) {
+	s := newTestServer(&mockNFS{archiveEntries: nil}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/archive-contents?path=empty.zip", nil)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestArchiveContentsHandler_NoAuth(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequestNoAuth(s.Handler(), "GET", "/servers/myserver/archive-contents?path=test.zip")
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+// --- Write File handler tests ---
+
+func TestWriteFileHandler_Success(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{
+		"path":    "server.properties",
+		"content": "motd=Hello World",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/files/write", body)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "ok" {
+		t.Errorf("status = %q, want ok", resp["status"])
+	}
+	if resp["path"] != "server.properties" {
+		t.Errorf("path = %q, want server.properties", resp["path"])
+	}
+}
+
+func TestWriteFileHandler_MissingPath(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{
+		"content": "data",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/files/write", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{
+		"path":    "test.txt",
+		"content": "data",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/INVALID/files/write", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{writeFileErr: nfs.ErrPathTraversal}, &mockRCON{})
+	body := map[string]any{
+		"path":    "../../etc/passwd",
+		"content": "data",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/files/write", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_ExceedsMax(t *testing.T) {
+	s := newTestServer(&mockNFS{writeFileErr: fmt.Errorf("content size 2000000 exceeds maximum of 1048576 bytes")}, &mockRCON{})
+	body := map[string]any{
+		"path":    "test.txt",
+		"content": "data",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/files/write", body)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{writeFileErr: fmt.Errorf("disk full")}, &mockRCON{})
+	body := map[string]any{
+		"path":    "test.txt",
+		"content": "data",
+		"uid":     1001,
+		"gid":     1001,
+	}
+	rr := doRequest(s.Handler(), "POST", "/servers/myserver/files/write", body)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_InvalidJSON(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("POST", "/servers/myserver/files/write", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestWriteFileHandler_NoAuth(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequestNoAuth(s.Handler(), "POST", "/servers/myserver/files/write")
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rr.Code)
 	}

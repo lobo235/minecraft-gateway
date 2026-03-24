@@ -100,6 +100,8 @@ All config via ENV vars. Loaded from `.env` in development (via `godotenv`; miss
 | `PORT` | no | `8080` | Listen port |
 | `LOG_LEVEL` | no | `info` | Verbosity: `debug`, `info`, `warn`, `error` |
 | `DATA_DIR` | no | `/data` | Directory for `.backup-status` tracking files |
+| `MAX_DOWNLOAD_SIZE` | no | `2147483648` | Max download size in bytes (2GB default) |
+| `MAX_WRITE_FILE_SIZE` | no | `1048576` | Max file write size in bytes (1MB default) |
 
 ## Architecture
 
@@ -137,10 +139,13 @@ All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
 | GET | `/servers` | Yes | List server directories on NFS volume |
 | POST | `/servers` | Yes | Create server dir `{"name":"...","uid":N,"gid":N}` |
 | DELETE | `/servers/{name}` | Yes | Delete server dir (requires `?confirm=true`) |
+| POST | `/servers/{name}/download` | Yes | Download file `{"url":"...","dest_path":"...","extract":bool,"uid":N,"gid":N,"mode":"overwrite\|skip_existing\|clean_first"}` |
+| GET | `/servers/{name}/archive-contents` | Yes | List archive entries (`?path=mods.zip`) supports .zip, .tar.gz, .tar.zst |
 | GET | `/servers/{name}/disk-usage` | Yes | Disk usage in bytes |
 | GET | `/servers/{name}/files` | Yes | List files (`?path=subdir`) |
 | GET | `/servers/{name}/files/read` | Yes | Read file (`?path=logs/latest.log`) max 1MB |
 | GET | `/servers/{name}/files/grep` | Yes | Grep (`?path=...&pattern=...`) max 10k lines/5MB |
+| POST | `/servers/{name}/files/write` | Yes | Write file `{"path":"...","content":"...","uid":N,"gid":N}` max configurable (default 1MB) |
 | GET | `/servers/{name}/backups` | Yes | List available `.tar.zst` backups |
 | POST | `/servers/{name}/backups` | Yes | Trigger async backup; returns backup ID |
 | GET | `/servers/{name}/backups/{backupID}` | Yes | Backup status/details |

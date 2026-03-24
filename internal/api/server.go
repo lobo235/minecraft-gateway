@@ -45,6 +45,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /servers", auth(http.HandlerFunc(s.createServerHandler())))
 	mux.Handle("DELETE /servers/{name}", auth(http.HandlerFunc(s.deleteServerHandler())))
 
+	// File download.
+	mux.Handle("POST /servers/{name}/download", auth(http.HandlerFunc(s.downloadHandler())))
+
+	// Archive contents.
+	mux.Handle("GET /servers/{name}/archive-contents", auth(http.HandlerFunc(s.archiveContentsHandler())))
+
 	// Disk usage.
 	mux.Handle("GET /servers/{name}/disk-usage", auth(http.HandlerFunc(s.diskUsageHandler())))
 
@@ -52,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /servers/{name}/files", auth(http.HandlerFunc(s.listFilesHandler())))
 	mux.Handle("GET /servers/{name}/files/read", auth(http.HandlerFunc(s.readFileHandler())))
 	mux.Handle("GET /servers/{name}/files/grep", auth(http.HandlerFunc(s.grepFilesHandler())))
+	mux.Handle("POST /servers/{name}/files/write", auth(http.HandlerFunc(s.writeFileHandler())))
 
 	// Backup operations.
 	mux.Handle("GET /servers/{name}/backups", auth(http.HandlerFunc(s.listBackupsHandler())))
