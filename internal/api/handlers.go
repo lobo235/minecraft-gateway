@@ -139,21 +139,39 @@ func (s *Server) downloadHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_body", "mode must be one of: overwrite, skip_existing, clean_first")
 			return
 		}
-		result, err := s.nfs.Download(name, req.URL, req.DestPath, req.Extract, req.UID, req.GID, nfs.DownloadMode(req.Mode))
+		id, err := s.nfs.StartDownload(name, req.URL, req.DestPath, req.Extract, req.UID, req.GID, nfs.DownloadMode(req.Mode))
 		if err != nil {
 			if errors.Is(err, nfs.ErrPathTraversal) {
 				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
 				return
 			}
-			s.log.Error("download failed", "error", err, "server", name, "trace_id", traceIDFromContext(r.Context()))
-			writeError(w, http.StatusInternalServerError, "internal_error", "failed to download file")
+			s.log.Error("start download failed", "error", err, "server", name, "trace_id", traceIDFromContext(r.Context()))
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to start download")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":      "ok",
-			"files_count": result.FilesCount,
-			"total_bytes": result.TotalBytes,
-		})
+		writeJSON(w, http.StatusCreated, map[string]string{"id": id, "status": "running"})
+	}
+}
+
+func (s *Server) getDownloadStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !validServerName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
+			return
+		}
+		downloadID := r.PathValue("downloadID")
+		status, err := s.nfs.GetDownloadStatus(name, downloadID)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid download ID") {
+				writeError(w, http.StatusNotFound, "not_found", "download not found")
+				return
+			}
+			s.log.Error("get download status failed", "error", err, "trace_id", traceIDFromContext(r.Context()))
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to get download status")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 	}
 }
 

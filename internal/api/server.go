@@ -47,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 
 	// File download.
 	mux.Handle("POST /servers/{name}/download", auth(http.HandlerFunc(s.downloadHandler())))
+	mux.Handle("GET /servers/{name}/downloads/{downloadID}", auth(http.HandlerFunc(s.getDownloadStatusHandler())))
 
 	// Archive contents.
 	mux.Handle("GET /servers/{name}/archive-contents", auth(http.HandlerFunc(s.archiveContentsHandler())))

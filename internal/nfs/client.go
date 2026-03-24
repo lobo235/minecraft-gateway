@@ -48,11 +48,13 @@ type Client interface {
 	Restore(serverName, backupID string) error
 	// Migrate renames a server directory.
 	Migrate(serverName, newName string) error
-	// Download fetches a file from url into destPath within a server directory.
+	// StartDownload triggers an async file download, returning a download ID.
 	// If extract is true, zip/tar.gz/tar.zst archives are extracted to destPath.
 	// All resulting files are chowned to uid:gid.
 	// mode controls overwrite behavior: "overwrite" (default), "skip_existing", "clean_first".
-	Download(serverName, url, destPath string, extract bool, uid, gid int, mode DownloadMode) (*DownloadResult, error)
+	StartDownload(serverName, url, destPath string, extract bool, uid, gid int, mode DownloadMode) (string, error)
+	// GetDownloadStatus returns the status of a download by ID.
+	GetDownloadStatus(serverName, downloadID string) (*DownloadStatus, error)
 	// ListArchiveContents lists file entries inside a zip or tar archive on the server filesystem.
 	ListArchiveContents(serverName, path string) ([]ArchiveEntry, error)
 	// WriteFile writes content to a file on the server filesystem, creating parent dirs as needed.
@@ -101,6 +103,19 @@ type BackupStatus struct {
 type DownloadResult struct {
 	FilesCount int   `json:"files_count"`
 	TotalBytes int64 `json:"total_bytes"`
+}
+
+// DownloadStatus tracks the state of an async download operation.
+type DownloadStatus struct {
+	ID          string          `json:"id"`
+	Status      string          `json:"status"` // running, done, failed
+	URL         string          `json:"url"`
+	DestPath    string          `json:"dest_path"`
+	Extract     bool            `json:"extract"`
+	StartedAt   string          `json:"started_at"`
+	CompletedAt string          `json:"completed_at,omitempty"`
+	Result      *DownloadResult `json:"result,omitempty"`
+	Error       string          `json:"error,omitempty"`
 }
 
 // DownloadMode controls how downloads handle existing files.
@@ -612,12 +627,12 @@ func (c *client) writeBackupStatus(serverName string, status *BackupStatus) erro
 	return os.WriteFile(statusFile, data, 0644)
 }
 
-// Download fetches a file from url into destPath within a server directory.
-// destPath is always treated as a directory (the downloaded file's name comes from the URL).
-func (c *client) Download(serverName, rawURL, destPath string, extract bool, uid, gid int, mode DownloadMode) (*DownloadResult, error) {
+// StartDownload triggers an async file download, returning immediately with a download ID.
+func (c *client) StartDownload(serverName, rawURL, destPath string, extract bool, uid, gid int, mode DownloadMode) (string, error) {
+	// Validate paths up front so callers get immediate errors for bad input.
 	dest, err := c.SafePath(serverName, destPath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	// If destPath looks like a file (has a file extension), use the parent directory
@@ -627,62 +642,168 @@ func (c *client) Download(serverName, rawURL, destPath string, extract bool, uid
 		dest = filepath.Dir(dest)
 	}
 
+	id := time.Now().UTC().Format("2006-01-02T15-04-05")
+
+	status := &DownloadStatus{
+		ID:        id,
+		Status:    "running",
+		URL:       rawURL,
+		DestPath:  destPath,
+		Extract:   extract,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := c.writeDownloadStatus(serverName, id, status); err != nil {
+		return "", fmt.Errorf("write download status: %w", err)
+	}
+
+	go c.runDownload(serverName, rawURL, dest, extract, uid, gid, mode, id)
+
+	return id, nil
+}
+
+func (c *client) runDownload(serverName, rawURL, dest string, extract bool, uid, gid int, mode DownloadMode, downloadID string) {
 	// Handle clean_first mode: remove all contents in dest before downloading.
 	if mode == ModeCleanFirst {
 		if err := os.MkdirAll(dest, 0755); err != nil {
-			return nil, fmt.Errorf("create dest dir: %w", err)
+			c.log.Error("download clean_first mkdir failed", "server", serverName, "id", downloadID, "error", err)
+			c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+			return
 		}
 		entries, err := os.ReadDir(dest)
 		if err != nil {
-			return nil, fmt.Errorf("read dest dir for clean: %w", err)
+			c.log.Error("download clean_first readdir failed", "server", serverName, "id", downloadID, "error", err)
+			c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+			return
 		}
 		for _, entry := range entries {
 			if err := os.RemoveAll(filepath.Join(dest, entry.Name())); err != nil {
-				return nil, fmt.Errorf("clean dest dir: %w", err)
+				c.log.Error("download clean_first remove failed", "server", serverName, "id", downloadID, "error", err)
+				c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+				return
 			}
 		}
 	}
 
 	// Ensure destination directory exists.
 	if err := os.MkdirAll(dest, 0755); err != nil {
-		return nil, fmt.Errorf("create dest dir: %w", err)
+		c.log.Error("download mkdir failed", "server", serverName, "id", downloadID, "error", err)
+		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+		return
 	}
 
 	// Download to a temp file.
 	tmpFile, err := os.CreateTemp("", "mc-download-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
+		c.log.Error("download create temp failed", "server", serverName, "id", downloadID, "error", err)
+		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+		return
 	}
 	tmpPath := tmpFile.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if err := c.downloadFile(rawURL, tmpFile); err != nil {
 		_ = tmpFile.Close()
-		return nil, err
+		c.log.Error("download fetch failed", "server", serverName, "id", downloadID, "error", err)
+		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+		return
 	}
 	if err := tmpFile.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
+		c.log.Error("download close temp failed", "server", serverName, "id", downloadID, "error", err)
+		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+		return
 	}
 
 	var result *DownloadResult
 	if extract {
 		result, err = c.extractArchive(tmpPath, dest, rawURL, mode)
 		if err != nil {
-			return nil, fmt.Errorf("extract: %w", err)
+			c.log.Error("download extract failed", "server", serverName, "id", downloadID, "error", err)
+			c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+			return
 		}
 	} else {
 		result, err = c.moveFile(tmpPath, dest, rawURL, mode)
 		if err != nil {
-			return nil, fmt.Errorf("move file: %w", err)
+			c.log.Error("download move failed", "server", serverName, "id", downloadID, "error", err)
+			c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+			return
 		}
 	}
 
 	// Recursively chown all files to uid:gid.
 	if err := chownRecursive(dest, uid, gid); err != nil {
-		return nil, fmt.Errorf("chown: %w", err)
+		c.log.Error("download chown failed", "server", serverName, "id", downloadID, "error", err)
+		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
+		return
 	}
 
-	return result, nil
+	c.log.Info("download completed", "server", serverName, "id", downloadID)
+	c.writeDownloadStatusDirect(serverName, downloadID, "done", result, "")
+}
+
+// GetDownloadStatus reads the download status file for a given server and download ID.
+func (c *client) GetDownloadStatus(serverName, downloadID string) (*DownloadStatus, error) {
+	if !backupIDRegex.MatchString(downloadID) {
+		return nil, fmt.Errorf("invalid download ID")
+	}
+	statusFile := filepath.Join(c.dataDir, serverName+".download-"+downloadID+".status")
+	data, err := os.ReadFile(statusFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("download status not found")
+		}
+		return nil, fmt.Errorf("read download status: %w", err)
+	}
+	var status DownloadStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil, fmt.Errorf("parse download status: %w", err)
+	}
+	return &status, nil
+}
+
+func (c *client) writeDownloadStatus(serverName, downloadID string, status *DownloadStatus) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := os.MkdirAll(c.dataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	statusFile := filepath.Join(c.dataDir, serverName+".download-"+downloadID+".status")
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal download status: %w", err)
+	}
+	return os.WriteFile(statusFile, data, 0644)
+}
+
+func (c *client) writeDownloadStatusDirect(serverName, downloadID, statusStr string, result *DownloadResult, errMsg string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if mkdirErr := os.MkdirAll(c.dataDir, 0755); mkdirErr != nil {
+		c.log.Error("create data dir failed", "error", mkdirErr)
+		return
+	}
+
+	status := &DownloadStatus{
+		ID:          downloadID,
+		Status:      statusStr,
+		StartedAt:   time.Now().UTC().Format(time.RFC3339),
+		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+		Result:      result,
+		Error:       errMsg,
+	}
+
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		c.log.Error("marshal download status failed", "error", err)
+		return
+	}
+
+	statusFile := filepath.Join(c.dataDir, serverName+".download-"+downloadID+".status")
+	if err := os.WriteFile(statusFile, data, 0644); err != nil {
+		c.log.Error("write download status file failed", "error", err)
+	}
 }
 
 // downloadFile fetches rawURL into the provided file with a size limit and timeout.

@@ -16,32 +16,34 @@ import (
 // --- Mock NFS client ---
 
 type mockNFS struct {
-	servers        []string
-	listErr        error
-	createErr      error
-	deleteErr      error
-	diskUsage      int64
-	diskUsageErr   error
-	files          []nfs.FileEntry
-	listFilesErr   error
-	fileContent    []byte
-	readFileErr    error
-	grepResult     *nfs.GrepResult
-	grepErr        error
-	backups        []nfs.BackupInfo
-	listBackErr    error
-	backupID       string
-	startBackErr   error
-	backupStatus   *nfs.BackupStatus
-	getStatusErr   error
-	restoreErr     error
-	migrateErr     error
-	downloadResult *nfs.DownloadResult
-	downloadErr    error
-	archiveEntries []nfs.ArchiveEntry
-	archiveErr     error
-	writeFileErr   error
-	moveFileErr    error
+	servers          []string
+	listErr          error
+	createErr        error
+	deleteErr        error
+	diskUsage        int64
+	diskUsageErr     error
+	files            []nfs.FileEntry
+	listFilesErr     error
+	fileContent      []byte
+	readFileErr      error
+	grepResult       *nfs.GrepResult
+	grepErr          error
+	backups          []nfs.BackupInfo
+	listBackErr      error
+	backupID         string
+	startBackErr     error
+	backupStatus     *nfs.BackupStatus
+	getStatusErr     error
+	restoreErr       error
+	migrateErr       error
+	downloadID       string
+	startDownloadErr error
+	downloadStatus   *nfs.DownloadStatus
+	getDownloadErr   error
+	archiveEntries   []nfs.ArchiveEntry
+	archiveErr       error
+	writeFileErr     error
+	moveFileErr      error
 }
 
 func (m *mockNFS) SafePath(parts ...string) (string, error) { return "", nil }
@@ -63,8 +65,11 @@ func (m *mockNFS) GetBackupStatus(string, string) (*nfs.BackupStatus, error) {
 }
 func (m *mockNFS) Restore(string, string) error { return m.restoreErr }
 func (m *mockNFS) Migrate(string, string) error { return m.migrateErr }
-func (m *mockNFS) Download(string, string, string, bool, int, int, nfs.DownloadMode) (*nfs.DownloadResult, error) {
-	return m.downloadResult, m.downloadErr
+func (m *mockNFS) StartDownload(string, string, string, bool, int, int, nfs.DownloadMode) (string, error) {
+	return m.downloadID, m.startDownloadErr
+}
+func (m *mockNFS) GetDownloadStatus(string, string) (*nfs.DownloadStatus, error) {
+	return m.downloadStatus, m.getDownloadErr
 }
 func (m *mockNFS) ListArchiveContents(string, string) ([]nfs.ArchiveEntry, error) {
 	return m.archiveEntries, m.archiveErr
@@ -1061,7 +1066,7 @@ func TestNoBearerPrefix(t *testing.T) {
 
 func TestDownloadHandler_Success(t *testing.T) {
 	mock := &mockNFS{
-		downloadResult: &nfs.DownloadResult{FilesCount: 3, TotalBytes: 12345},
+		downloadID: "2026-03-24T10-00-00",
 	}
 	s := newTestServer(mock, &mockRCON{})
 	body := map[string]any{
@@ -1072,20 +1077,17 @@ func TestDownloadHandler_Success(t *testing.T) {
 		"gid":       1001,
 	}
 	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
-	if rr.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rr.Code)
+	if rr.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rr.Code)
 	}
 
-	var resp map[string]any
+	var resp map[string]string
 	json.Unmarshal(rr.Body.Bytes(), &resp)
-	if resp["status"] != "ok" {
-		t.Errorf("status = %v, want ok", resp["status"])
+	if resp["status"] != "running" {
+		t.Errorf("status = %v, want running", resp["status"])
 	}
-	if resp["files_count"] != float64(3) {
-		t.Errorf("files_count = %v, want 3", resp["files_count"])
-	}
-	if resp["total_bytes"] != float64(12345) {
-		t.Errorf("total_bytes = %v, want 12345", resp["total_bytes"])
+	if resp["id"] != "2026-03-24T10-00-00" {
+		t.Errorf("id = %v, want 2026-03-24T10-00-00", resp["id"])
 	}
 }
 
@@ -1123,7 +1125,7 @@ func TestDownloadHandler_DisallowedURL(t *testing.T) {
 
 func TestDownloadHandler_PathTraversal(t *testing.T) {
 	mock := &mockNFS{
-		downloadErr: nfs.ErrPathTraversal,
+		startDownloadErr: nfs.ErrPathTraversal,
 	}
 	s := newTestServer(mock, &mockRCON{})
 	body := map[string]any{
@@ -1138,7 +1140,7 @@ func TestDownloadHandler_PathTraversal(t *testing.T) {
 
 func TestDownloadHandler_InternalError(t *testing.T) {
 	mock := &mockNFS{
-		downloadErr: fmt.Errorf("download failed"),
+		startDownloadErr: fmt.Errorf("download failed"),
 	}
 	s := newTestServer(mock, &mockRCON{})
 	body := map[string]any{
@@ -1183,7 +1185,7 @@ func TestDownloadHandler_InvalidMode(t *testing.T) {
 
 func TestDownloadHandler_SkipExistingMode(t *testing.T) {
 	mock := &mockNFS{
-		downloadResult: &nfs.DownloadResult{FilesCount: 0, TotalBytes: 0},
+		downloadID: "2026-03-24T10-00-00",
 	}
 	s := newTestServer(mock, &mockRCON{})
 	body := map[string]any{
@@ -1191,14 +1193,14 @@ func TestDownloadHandler_SkipExistingMode(t *testing.T) {
 		"mode": "skip_existing",
 	}
 	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
-	if rr.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rr.Code)
+	if rr.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rr.Code)
 	}
 }
 
 func TestDownloadHandler_CleanFirstMode(t *testing.T) {
 	mock := &mockNFS{
-		downloadResult: &nfs.DownloadResult{FilesCount: 5, TotalBytes: 50000},
+		downloadID: "2026-03-24T10-00-00",
 	}
 	s := newTestServer(mock, &mockRCON{})
 	body := map[string]any{
@@ -1206,8 +1208,75 @@ func TestDownloadHandler_CleanFirstMode(t *testing.T) {
 		"mode": "clean_first",
 	}
 	rr := doRequest(s.Handler(), "POST", "/servers/myserver/download", body)
+	if rr.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rr.Code)
+	}
+}
+
+// --- Download status handler tests ---
+
+func TestGetDownloadStatusHandler_Success(t *testing.T) {
+	mock := &mockNFS{
+		downloadStatus: &nfs.DownloadStatus{
+			ID:        "2026-03-24T10-00-00",
+			Status:    "done",
+			URL:       "https://edge.forgecdn.net/files/test.zip",
+			DestPath:  "mods",
+			Extract:   true,
+			StartedAt: "2026-03-24T10:00:00Z",
+			Result:    &nfs.DownloadResult{FilesCount: 3, TotalBytes: 12345},
+		},
+	}
+	s := newTestServer(mock, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/downloads/2026-03-24T10-00-00", nil)
 	if rr.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	var resp nfs.DownloadStatus
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Status != "done" {
+		t.Errorf("status = %q, want done", resp.Status)
+	}
+	if resp.Result == nil || resp.Result.FilesCount != 3 {
+		t.Errorf("result.files_count = %v, want 3", resp.Result)
+	}
+}
+
+func TestGetDownloadStatusHandler_NotFound(t *testing.T) {
+	mock := &mockNFS{
+		getDownloadErr: fmt.Errorf("download status not found"),
+	}
+	s := newTestServer(mock, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/downloads/2026-03-24T10-00-00", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestGetDownloadStatusHandler_InvalidID(t *testing.T) {
+	mock := &mockNFS{
+		getDownloadErr: fmt.Errorf("invalid download ID"),
+	}
+	s := newTestServer(mock, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/myserver/downloads/bad!id@here", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestGetDownloadStatusHandler_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/INVALID/downloads/2026-03-24T10-00-00", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestGetDownloadStatusHandler_NoAuth(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequestNoAuth(s.Handler(), "GET", "/servers/myserver/downloads/2026-03-24T10-00-00")
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
 	}
 }
 

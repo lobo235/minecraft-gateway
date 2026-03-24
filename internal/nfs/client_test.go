@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -841,24 +842,42 @@ func TestRestore_ServerPathTraversal(t *testing.T) {
 
 // --- Download ---
 
-func TestDownload_PathTraversal(t *testing.T) {
+// waitForDownload polls GetDownloadStatus until the download is no longer "running" or timeout.
+func waitForDownload(t *testing.T, c *client, serverName, downloadID string) *DownloadStatus {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := c.GetDownloadStatus(serverName, downloadID)
+		if err != nil {
+			t.Fatalf("GetDownloadStatus failed: %v", err)
+		}
+		if status.Status != "running" {
+			return status
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("download did not complete within timeout")
+	return nil
+}
+
+func TestStartDownload_PathTraversal(t *testing.T) {
 	c, _ := newTestClient(t)
-	_, err := c.Download("../escape", "https://example.com/file.zip", ".", false, 1000, 1000, ModeOverwrite)
+	_, err := c.StartDownload("../escape", "https://example.com/file.zip", ".", false, 1000, 1000, ModeOverwrite)
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
 	}
 }
 
-func TestDownload_DestPathTraversal(t *testing.T) {
+func TestStartDownload_DestPathTraversal(t *testing.T) {
 	c, base := newTestClient(t)
 	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
-	_, err := c.Download("myserver", "https://example.com/file.zip", "../../escape", false, 1000, 1000, ModeOverwrite)
+	_, err := c.StartDownload("myserver", "https://example.com/file.zip", "../../escape", false, 1000, 1000, ModeOverwrite)
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
 	}
 }
 
-func TestDownload_NoExtract(t *testing.T) {
+func TestStartDownload_NoExtract(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -871,15 +890,26 @@ func TestDownload_NoExtract(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	id, err := c.StartDownload("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.FilesCount != 1 {
-		t.Errorf("files_count = %d, want 1", result.FilesCount)
+	if id == "" {
+		t.Fatal("expected non-empty download ID")
 	}
-	if result.TotalBytes != int64(len(content)) {
-		t.Errorf("total_bytes = %d, want %d", result.TotalBytes, len(content))
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
+	if status.Result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if status.Result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", status.Result.FilesCount)
+	}
+	if status.Result.TotalBytes != int64(len(content)) {
+		t.Errorf("total_bytes = %d, want %d", status.Result.TotalBytes, len(content))
 	}
 
 	// Verify the file was written.
@@ -893,7 +923,7 @@ func TestDownload_NoExtract(t *testing.T) {
 	}
 }
 
-func TestDownload_ExtractZip(t *testing.T) {
+func TestStartDownload_ExtractZip(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -927,12 +957,17 @@ func TestDownload_ExtractZip(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
+	id, err := c.StartDownload("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.FilesCount != 2 {
-		t.Errorf("files_count = %d, want 2", result.FilesCount)
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
+	if status.Result.FilesCount != 2 {
+		t.Errorf("files_count = %d, want 2", status.Result.FilesCount)
 	}
 
 	// Verify files were extracted.
@@ -944,7 +979,7 @@ func TestDownload_ExtractZip(t *testing.T) {
 	}
 }
 
-func TestDownload_HTTPError(t *testing.T) {
+func TestStartDownload_HTTPError(t *testing.T) {
 	c, base := newTestClient(t)
 	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
 
@@ -953,13 +988,21 @@ func TestDownload_HTTPError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, err := c.Download("myserver", ts.URL+"/missing.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
-	if err == nil {
-		t.Fatal("expected error for HTTP 404")
+	id, err := c.StartDownload("myserver", ts.URL+"/missing.jar", ".", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err != nil {
+		t.Fatalf("unexpected error starting download: %v", err)
+	}
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "failed" {
+		t.Errorf("status = %q, want failed", status.Status)
+	}
+	if status.Error == "" {
+		t.Error("expected non-empty error message")
 	}
 }
 
-func TestDownload_UnsupportedArchive(t *testing.T) {
+func TestStartDownload_UnsupportedArchive(t *testing.T) {
 	c, base := newTestClient(t)
 	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
 
@@ -969,13 +1012,18 @@ func TestDownload_UnsupportedArchive(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, err := c.Download("myserver", ts.URL+"/file.rar", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
-	if err == nil {
-		t.Fatal("expected error for unsupported archive format")
+	id, err := c.StartDownload("myserver", ts.URL+"/file.rar", ".", true, os.Getuid(), os.Getgid(), ModeOverwrite)
+	if err != nil {
+		t.Fatalf("unexpected error starting download: %v", err)
+	}
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "failed" {
+		t.Errorf("status = %q, want failed", status.Status)
 	}
 }
 
-func TestDownload_SubDestPath(t *testing.T) {
+func TestStartDownload_SubDestPath(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -987,18 +1035,47 @@ func TestDownload_SubDestPath(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/plugin.jar", "plugins", false, os.Getuid(), os.Getgid(), ModeOverwrite)
+	id, err := c.StartDownload("myserver", ts.URL+"/plugin.jar", "plugins", false, os.Getuid(), os.Getgid(), ModeOverwrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.FilesCount != 1 {
-		t.Errorf("files_count = %d, want 1", result.FilesCount)
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
+	if status.Result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", status.Result.FilesCount)
 	}
 
 	// Verify the file was written to the subdirectory.
 	downloaded := filepath.Join(serverDir, "plugins", "plugin.jar")
 	if _, err := os.Stat(downloaded); err != nil {
 		t.Errorf("file not found at %s: %v", downloaded, err)
+	}
+}
+
+// --- GetDownloadStatus ---
+
+func TestGetDownloadStatus_NotFound(t *testing.T) {
+	c, _ := newTestClient(t)
+	_, err := c.GetDownloadStatus("myserver", "2026-03-24T10-00-00")
+	if err == nil {
+		t.Fatal("expected error for nonexistent download status")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want 'not found'", err.Error())
+	}
+}
+
+func TestGetDownloadStatus_InvalidID(t *testing.T) {
+	c, _ := newTestClient(t)
+	_, err := c.GetDownloadStatus("myserver", "../../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for invalid download ID")
+	}
+	if !strings.Contains(err.Error(), "invalid download ID") {
+		t.Errorf("error = %q, want 'invalid download ID'", err.Error())
 	}
 }
 
@@ -1038,7 +1115,7 @@ func TestChownRecursive(t *testing.T) {
 
 // --- Download modes ---
 
-func TestDownload_SkipExisting(t *testing.T) {
+func TestStartDownload_SkipExisting(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -1053,12 +1130,17 @@ func TestDownload_SkipExisting(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeSkipExisting)
+	id, err := c.StartDownload("myserver", ts.URL+"/testfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeSkipExisting)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.FilesCount != 0 {
-		t.Errorf("files_count = %d, want 0 (skipped)", result.FilesCount)
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
+	if status.Result.FilesCount != 0 {
+		t.Errorf("files_count = %d, want 0 (skipped)", status.Result.FilesCount)
 	}
 
 	// Verify original content was preserved.
@@ -1068,7 +1150,7 @@ func TestDownload_SkipExisting(t *testing.T) {
 	}
 }
 
-func TestDownload_CleanFirst(t *testing.T) {
+func TestStartDownload_CleanFirst(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -1084,12 +1166,17 @@ func TestDownload_CleanFirst(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/newfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeCleanFirst)
+	id, err := c.StartDownload("myserver", ts.URL+"/newfile.jar", ".", false, os.Getuid(), os.Getgid(), ModeCleanFirst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.FilesCount != 1 {
-		t.Errorf("files_count = %d, want 1", result.FilesCount)
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
+	if status.Result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1", status.Result.FilesCount)
 	}
 
 	// Verify old files were cleaned.
@@ -1106,7 +1193,7 @@ func TestDownload_CleanFirst(t *testing.T) {
 	}
 }
 
-func TestDownload_SkipExisting_ExtractZip(t *testing.T) {
+func TestStartDownload_SkipExisting_ExtractZip(t *testing.T) {
 	c, base := newTestClient(t)
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(serverDir, 0755)
@@ -1132,13 +1219,18 @@ func TestDownload_SkipExisting_ExtractZip(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := c.Download("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeSkipExisting)
+	id, err := c.StartDownload("myserver", ts.URL+"/mods.zip", ".", true, os.Getuid(), os.Getgid(), ModeSkipExisting)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
+	status := waitForDownload(t, c, "myserver", id)
+	if status.Status != "done" {
+		t.Fatalf("status = %q, want done; error = %q", status.Status, status.Error)
+	}
 	// Only file2.txt should be extracted (file1.txt was skipped).
-	if result.FilesCount != 1 {
-		t.Errorf("files_count = %d, want 1 (file1.txt skipped)", result.FilesCount)
+	if status.Result.FilesCount != 1 {
+		t.Errorf("files_count = %d, want 1 (file1.txt skipped)", status.Result.FilesCount)
 	}
 
 	// Verify file1.txt was not overwritten.

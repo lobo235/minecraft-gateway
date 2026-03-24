@@ -128,6 +128,8 @@ internal/rcon/client.go         — RCON client (resolves connection from upstre
 
 **Backup flow:** `POST /servers/{name}/backups` triggers an async backup using pzstd (parallel zstd). Returns immediately with a backup ID. Status tracked in `.backup-status` JSON files at `DATA_DIR/<server-name>.backup-status`. Files stored at `<NFS_BASE_PATH>/<server>/backups/<id>.tar.zst`.
 
+**Download flow:** `POST /servers/{name}/download` triggers an async download. Returns immediately with a download ID and status "running" (201 Created). Status tracked in `.download-<id>.status` JSON files at `DATA_DIR/<server-name>.download-<id>.status`. Poll `GET /servers/{name}/downloads/{id}` for completion. Status includes result (files_count, total_bytes) on success, or error message on failure.
+
 **Restore sequencing:** `POST /servers/{name}/restore` performs NO liveness check — it always attempts the restore. The MCP server orchestration layer is responsible for stopping the server before restore and restarting it afterward. If restore runs while the server is live, the JVM will overwrite restored data on the next autosave, causing silent data loss.
 
 ## API Routes
@@ -140,7 +142,8 @@ All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
 | GET | `/servers` | Yes | List server directories on NFS volume |
 | POST | `/servers` | Yes | Create server dir `{"name":"...","uid":N,"gid":N}` |
 | DELETE | `/servers/{name}` | Yes | Delete server dir (requires `?confirm=true`) |
-| POST | `/servers/{name}/download` | Yes | Download file `{"url":"...","dest_path":"...","extract":bool,"uid":N,"gid":N,"mode":"overwrite\|skip_existing\|clean_first"}` |
+| POST | `/servers/{name}/download` | Yes | Start async download `{"url":"...","dest_path":"...","extract":bool,"uid":N,"gid":N,"mode":"overwrite\|skip_existing\|clean_first"}` returns 201 with `{"id":"...","status":"running"}` |
+| GET | `/servers/{name}/downloads/{downloadID}` | Yes | Download status/details |
 | GET | `/servers/{name}/archive-contents` | Yes | List archive entries (`?path=mods.zip`) supports .zip, .tar.gz, .tar.zst |
 | GET | `/servers/{name}/disk-usage` | Yes | Disk usage in bytes |
 | GET | `/servers/{name}/files` | Yes | List files (`?path=subdir`) |
@@ -248,3 +251,5 @@ Multi-stage build: `golang:1.24-alpine` → `alpine:3.21`. Statically compiled (
 - **Single backup status per server:** Only the most recent backup status is tracked per server in the `.backup-status` file. Starting a new backup overwrites the previous status.
 - **Backup timestamp IDs:** Backup IDs use second-precision UTC timestamps (`2006-01-02T15-04-05`). Starting two backups for the same server within the same second will collide.
 - **pzstd required at runtime:** The `pzstd` binary must be available in `PATH` for backup/restore operations. The Dockerfile includes it via `apk add zstd`.
+- **Download timestamp IDs:** Download IDs use second-precision UTC timestamps (`2006-01-02T15-04-05`). Starting two downloads for the same server within the same second will collide.
+- **Download status files are per-download:** Each download creates its own status file (`<server>.download-<id>.status`), unlike backups which overwrite a single status file per server.
