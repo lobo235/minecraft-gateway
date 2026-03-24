@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -468,5 +469,571 @@ func TestPathTraversalInHandler(t *testing.T) {
 	json.NewDecoder(rr.Body).Decode(&resp)
 	if resp.Code != "path_traversal" {
 		t.Errorf("code = %q, want path_traversal", resp.Code)
+	}
+}
+
+// --- RCON error paths ---
+
+func TestRCONExecute_NotFoundError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{
+		err: fmt.Errorf("resolve rcon endpoint: no running allocation with rcon port found for mc-test"),
+	})
+	body := map[string]string{"command": "say hello"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon", body)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestRCONExecute_UpstreamError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{
+		err: fmt.Errorf("rcon connect to 10.0.0.1:25575: connection refused"),
+	})
+	body := map[string]string{"command": "say hello"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon", body)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestRCONExecute_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]string{"command": "say hello"}
+	rr := doRequest(s.Handler(), "POST", "/servers/INVALID!/rcon", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestRCONExecute_InvalidBody(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	// Send invalid JSON
+	req := httptest.NewRequest("POST", "/servers/mc-test/rcon", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- RCON Op error paths ---
+
+func TestRCONOp_UpstreamError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{err: fmt.Errorf("connection failed")})
+	body := map[string]string{"player": "Steve"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/op", body)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestRCONOp_MissingPlayer(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]string{"player": ""}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/op", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- RCON Deop error paths ---
+
+func TestRCONDeop_UpstreamError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{err: fmt.Errorf("connection failed")})
+	body := map[string]string{"player": "Steve"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/deop", body)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestRCONDeop_InvalidPlayer(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]string{"player": "invalid player!"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/deop", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- RCON Whitelist error paths ---
+
+func TestRCONWhitelist_UpstreamError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{err: fmt.Errorf("connection failed")})
+	body := map[string]any{"action": "add", "player": "Steve"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/whitelist", body)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestRCONWhitelist_InvalidPlayer(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]any{"action": "add", "player": "bad name!"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/whitelist", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestRCONWhitelist_RemoveAction(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{response: "Removed Steve from the whitelist"})
+	body := map[string]any{"action": "remove", "player": "Steve"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/rcon/whitelist", body)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+// --- RCON Players error paths ---
+
+func TestRCONPlayers_NotFoundError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{
+		err: fmt.Errorf("resolve rcon endpoint: no running allocation with rcon port found for mc-test"),
+	})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/rcon/players", nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestRCONPlayers_UpstreamError(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{err: fmt.Errorf("connection refused")})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/rcon/players", nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rr.Code)
+	}
+}
+
+func TestRCONPlayers_InvalidServerName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/INVALID!/rcon/players", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- ListServers error path ---
+
+func TestListServers_Error(t *testing.T) {
+	s := newTestServer(&mockNFS{listErr: fmt.Errorf("disk error")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestListServers_NilReturnsEmptyArray(t *testing.T) {
+	s := newTestServer(&mockNFS{servers: nil}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers", nil)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	var resp map[string][]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["servers"] == nil {
+		t.Error("expected non-nil servers array")
+	}
+	if len(resp["servers"]) != 0 {
+		t.Errorf("expected 0 servers, got %d", len(resp["servers"]))
+	}
+}
+
+// --- CreateServer error paths ---
+
+func TestCreateServer_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{createErr: nfs.ErrPathTraversal}, &mockRCON{})
+	body := map[string]any{"name": "mc-test", "uid": 1000, "gid": 1000}
+	rr := doRequest(s.Handler(), "POST", "/servers", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestCreateServer_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{createErr: fmt.Errorf("disk full")}, &mockRCON{})
+	body := map[string]any{"name": "mc-test", "uid": 1000, "gid": 1000}
+	rr := doRequest(s.Handler(), "POST", "/servers", body)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestCreateServer_InvalidBody(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("POST", "/servers", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- DeleteServer error paths ---
+
+func TestDeleteServer_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{deleteErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "DELETE", "/servers/mc-test?confirm=true", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDeleteServer_NotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{deleteErr: fmt.Errorf("server not found: mc-gone")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "DELETE", "/servers/mc-gone?confirm=true", nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestDeleteServer_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{deleteErr: fmt.Errorf("permission denied")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "DELETE", "/servers/mc-test?confirm=true", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestDeleteServer_InvalidName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	rr := doRequest(s.Handler(), "DELETE", "/servers/INVALID!?confirm=true", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- DiskUsage error paths ---
+
+func TestDiskUsage_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{diskUsageErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/disk-usage", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestDiskUsage_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{diskUsageErr: fmt.Errorf("du failed")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/disk-usage", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// --- ListFiles error paths ---
+
+func TestListFiles_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{listFilesErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files?path=../../etc", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestListFiles_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{listFilesErr: fmt.Errorf("io error")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestListFiles_NilReturnsEmptyArray(t *testing.T) {
+	s := newTestServer(&mockNFS{files: nil}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files", nil)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+// --- ReadFile error paths ---
+
+func TestReadFile_ExceedsMax(t *testing.T) {
+	s := newTestServer(&mockNFS{readFileErr: fmt.Errorf("file size 2000000 exceeds maximum of 1048576 bytes")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files/read?path=big.bin", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestReadFile_NotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{readFileErr: fmt.Errorf("stat file: no such file or directory")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files/read?path=missing.txt", nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestReadFile_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{readFileErr: fmt.Errorf("permission denied")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files/read?path=secret.txt", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// --- Grep error paths ---
+
+func TestGrepFiles_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{grepErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files/grep?path=../../etc&pattern=root", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestGrepFiles_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{grepErr: fmt.Errorf("grep failed")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/files/grep?path=logs&pattern=ERROR", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// --- ListBackups error paths ---
+
+func TestListBackups_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{listBackErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestListBackups_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{listBackErr: fmt.Errorf("disk error")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestListBackups_NilReturnsEmptyArray(t *testing.T) {
+	s := newTestServer(&mockNFS{backups: nil}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+}
+
+// --- StartBackup error paths ---
+
+func TestStartBackup_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{startBackErr: nfs.ErrPathTraversal}, &mockRCON{})
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestStartBackup_ServerNotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{startBackErr: fmt.Errorf("server not found: mc-test")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestStartBackup_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{startBackErr: fmt.Errorf("disk full")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/backups", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// --- GetBackupStatus error paths ---
+
+func TestGetBackupStatus_NotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{getStatusErr: fmt.Errorf("backup status not found")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/backups/fake-id", nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestGetBackupStatus_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{getStatusErr: fmt.Errorf("disk error")}, &mockRCON{})
+	rr := doRequest(s.Handler(), "GET", "/servers/mc-test/backups/some-id", nil)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// --- Restore error paths ---
+
+func TestRestore_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{restoreErr: nfs.ErrPathTraversal}, &mockRCON{})
+	body := map[string]string{"backup_id": "2026-03-22T10-00-00"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/restore", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestRestore_BackupNotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{restoreErr: fmt.Errorf("backup not found: fake-id")}, &mockRCON{})
+	body := map[string]string{"backup_id": "fake-id"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/restore", body)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestRestore_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{restoreErr: fmt.Errorf("tar extract failed")}, &mockRCON{})
+	body := map[string]string{"backup_id": "2026-03-22T10-00-00"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/restore", body)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestRestore_InvalidBody(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("POST", "/servers/mc-test/restore", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- Migrate error paths ---
+
+func TestMigrate_PathTraversal(t *testing.T) {
+	s := newTestServer(&mockNFS{migrateErr: nfs.ErrPathTraversal}, &mockRCON{})
+	body := map[string]string{"new_name": "mc-new"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/migrate", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestMigrate_NotFound(t *testing.T) {
+	s := newTestServer(&mockNFS{migrateErr: fmt.Errorf("server not found: mc-test")}, &mockRCON{})
+	body := map[string]string{"new_name": "mc-new"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/migrate", body)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestMigrate_Conflict(t *testing.T) {
+	s := newTestServer(&mockNFS{migrateErr: fmt.Errorf("target server already exists: mc-new")}, &mockRCON{})
+	body := map[string]string{"new_name": "mc-new"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/migrate", body)
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rr.Code)
+	}
+}
+
+func TestMigrate_InternalError(t *testing.T) {
+	s := newTestServer(&mockNFS{migrateErr: fmt.Errorf("rename failed")}, &mockRCON{})
+	body := map[string]string{"new_name": "mc-new"}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/migrate", body)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestMigrate_MissingNewName(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	body := map[string]string{}
+	rr := doRequest(s.Handler(), "POST", "/servers/mc-test/migrate", body)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestMigrate_InvalidBody(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("POST", "/servers/mc-test/migrate", bytes.NewBufferString("not json"))
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// --- Auth edge cases ---
+
+func TestWrongAPIKey(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("GET", "/servers", nil)
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestNoBearerPrefix(t *testing.T) {
+	s := newTestServer(&mockNFS{}, &mockRCON{})
+	req := httptest.NewRequest("GET", "/servers", nil)
+	req.Header.Set("Authorization", "test-api-key")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
 	}
 }
