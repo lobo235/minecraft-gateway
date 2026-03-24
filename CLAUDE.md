@@ -75,8 +75,7 @@ minecraft-gateway/
     │   ├── client.go         # vault-gateway HTTP client (RCON password retrieval)
     │   └── client_test.go
     ├── rcon/
-    │   ├── client.go         # RCON client (resolves host/port + password from upstreams)
-    │   └── client_test.go
+    │   └── client.go         # RCON client (resolves host/port + password from upstreams)
     └── api/
         ├── server.go         # HTTP mux + Run()
         ├── middleware.go     # Bearer auth + request logging + X-Trace-ID
@@ -170,7 +169,6 @@ Tests use `httptest.NewServer` to mock upstream HTTP APIs (nomad-gateway, vault-
 internal/nfs/client_test.go     — path traversal prevention, filesystem CRUD, backup operations
 internal/nomadgw/client_test.go — upstream client unit tests
 internal/vaultgw/client_test.go — upstream client unit tests
-internal/rcon/client_test.go    — RCON resolution and execution (mocked upstreams)
 internal/api/server_test.go     — handler tests via httptest (all endpoints)
 internal/config/config_test.go  — config loading and validation
 ```

@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -112,10 +113,21 @@ func (c *client) SafePath(parts ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
+	// Resolve symlinks to prevent escaping the base path via symlink targets.
+	// If the path doesn't exist yet (e.g., creating a new server dir), fall back to
+	// the unresolved abs path — the prefix check below still applies.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		abs = resolved
+	}
 	// Ensure the resolved path is within basePath (or is basePath itself).
 	base, err := filepath.Abs(c.basePath)
 	if err != nil {
 		return "", fmt.Errorf("resolve base path: %w", err)
+	}
+	// Also resolve symlinks on the base path for consistent comparison.
+	if resolvedBase, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolvedBase
 	}
 	if abs != base && !strings.HasPrefix(abs, base+string(filepath.Separator)) {
 		return "", ErrPathTraversal
@@ -249,9 +261,11 @@ func (c *client) GrepFiles(serverName, subPath, pattern string) (*GrepResult, er
 	if err != nil {
 		return nil, err
 	}
-	// Use grep with recursive flag for directories.
+	// Use grep with recursive flag for directories. Timeout after 30s to prevent DoS.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	args := []string{"-rn", "--", pattern, target}
-	cmd := exec.Command("grep", args...)
+	cmd := exec.CommandContext(ctx, "grep", args...)
 	out, err := cmd.Output()
 	// grep returns exit code 1 when no matches found — that's not an error.
 	if err != nil {
