@@ -17,14 +17,35 @@ var allowedDownloadHosts = []struct {
 	host       string
 	pathPrefix string // empty means any path on this host is allowed
 }{
+	// CurseForge CDN
 	{"edge.forgecdn.net", ""},
 	{"mediafilez.forgecdn.net", ""},
-	{"raw.githubusercontent.com", "/lobo235/"},
-	{"github.com", "/lobo235/"},
+	// Modrinth
 	{"cdn.modrinth.com", ""},
+	// FTB
 	{"feed-the-beast.com", ""},
 	{"api.feed-the-beast.com", ""},
 	{"api.modpacks.ch", ""},
+	// Forge / NeoForge
+	{"maven.minecraftforge.net", ""},
+	{"files.minecraftforge.net", ""},
+	{"maven.neoforged.net", ""},
+	// Paper / Bukkit / Spigot
+	{"api.papermc.io", ""},
+	{"download.getbukkit.org", ""},
+	{"hub.spigotmc.org", ""},
+	// Fabric
+	{"maven.fabricmc.net", ""},
+	{"meta.fabricmc.net", ""},
+	// Mojang
+	{"piston-data.mojang.com", ""},
+	{"launchermeta.mojang.com", ""},
+	{"launcher.mojang.com", ""},
+	{"libraries.minecraft.net", ""},
+	{"resources.download.minecraft.net", ""},
+	// Trusted GitHub (operator scripts)
+	{"raw.githubusercontent.com", "/lobo235/"},
+	{"github.com", "/lobo235/"},
 }
 
 // validServerName checks if the server name matches the allowed pattern.
