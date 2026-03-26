@@ -147,8 +147,8 @@ type ArchiveEntry struct {
 	IsDir bool   `json:"is_dir"`
 }
 
-// backupIDRegex validates backup IDs to prevent shell injection. IDs are timestamps like "2026-03-22T10-05-00".
-var backupIDRegex = regexp.MustCompile(`^[0-9T-]+$`)
+// safeIDRegex validates IDs to prevent path traversal. Accepts timestamps (2026-03-22T10-05-00) and UUIDs.
+var backupIDRegex = regexp.MustCompile(`^[0-9a-fA-FT-]+$`)
 
 const (
 	maxFileReadSize = 1 << 20 // 1MB
