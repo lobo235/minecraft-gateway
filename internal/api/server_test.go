@@ -59,12 +59,12 @@ func (m *mockNFS) GrepFiles(string, string, string) (*nfs.GrepResult, error) {
 	return m.grepResult, m.grepErr
 }
 func (m *mockNFS) ListBackups(string) ([]nfs.BackupInfo, error) { return m.backups, m.listBackErr }
-func (m *mockNFS) StartBackup(string) (string, error)           { return m.backupID, m.startBackErr }
+func (m *mockNFS) StartBackup(string, int, int) (string, error) { return m.backupID, m.startBackErr }
 func (m *mockNFS) GetBackupStatus(string, string) (*nfs.BackupStatus, error) {
 	return m.backupStatus, m.getStatusErr
 }
-func (m *mockNFS) Restore(string, string) error { return m.restoreErr }
-func (m *mockNFS) Migrate(string, string) error { return m.migrateErr }
+func (m *mockNFS) Restore(string, string, int, int) error { return m.restoreErr }
+func (m *mockNFS) Migrate(string, string) error           { return m.migrateErr }
 func (m *mockNFS) StartDownload(string, string, string, bool, int, int, nfs.DownloadMode) (string, error) {
 	return m.downloadID, m.startDownloadErr
 }
@@ -77,7 +77,7 @@ func (m *mockNFS) ListArchiveContents(string, string) ([]nfs.ArchiveEntry, error
 func (m *mockNFS) WriteFile(string, string, string, int, int) error {
 	return m.writeFileErr
 }
-func (m *mockNFS) MoveFile(string, string, string) error {
+func (m *mockNFS) MoveFile(string, string, string, int, int) error {
 	return m.moveFileErr
 }
 func (m *mockNFS) MaxWriteFileSize() int64 { return 1048576 }

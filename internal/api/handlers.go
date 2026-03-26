@@ -313,13 +313,21 @@ func (s *Server) listBackupsHandler() http.HandlerFunc {
 }
 
 func (s *Server) startBackupHandler() http.HandlerFunc {
+	type request struct {
+		UID int `json:"uid"`
+		GID int `json:"gid"`
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if !validServerName(name) {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid server name")
 			return
 		}
-		id, err := s.nfs.StartBackup(name)
+		limitBody(w, r, maxJSONBodySize)
+		var req request
+		// Best-effort decode — empty body is fine, uid/gid default to 0.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		id, err := s.nfs.StartBackup(name, req.UID, req.GID)
 		if err != nil {
 			if errors.Is(err, nfs.ErrPathTraversal) {
 				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
@@ -364,6 +372,8 @@ func (s *Server) getBackupStatusHandler() http.HandlerFunc {
 func (s *Server) restoreHandler() http.HandlerFunc {
 	type request struct {
 		BackupID string `json:"backup_id"`
+		UID      int    `json:"uid"`
+		GID      int    `json:"gid"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -381,7 +391,7 @@ func (s *Server) restoreHandler() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "missing_fields", "backup_id is required")
 			return
 		}
-		if err := s.nfs.Restore(name, req.BackupID); err != nil {
+		if err := s.nfs.Restore(name, req.BackupID, req.UID, req.GID); err != nil {
 			if errors.Is(err, nfs.ErrPathTraversal) {
 				writeError(w, http.StatusBadRequest, "path_traversal", "path traversal detected")
 				return
@@ -685,6 +695,8 @@ func (s *Server) moveFileHandler() http.HandlerFunc {
 		var body struct {
 			SrcPath string `json:"src_path"`
 			DstPath string `json:"dst_path"`
+			UID     int    `json:"uid"`
+			GID     int    `json:"gid"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
@@ -695,7 +707,7 @@ func (s *Server) moveFileHandler() http.HandlerFunc {
 			return
 		}
 
-		if err := s.nfs.MoveFile(name, body.SrcPath, body.DstPath); err != nil {
+		if err := s.nfs.MoveFile(name, body.SrcPath, body.DstPath, body.UID, body.GID); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				writeError(w, http.StatusNotFound, "not_found", err.Error())
 				return

@@ -151,9 +151,9 @@ All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
 | GET | `/servers/{name}/files/grep` | Yes | Grep (`?path=...&pattern=...`) max 10k lines/5MB |
 | POST | `/servers/{name}/files/write` | Yes | Write file `{"path":"...","content":"...","uid":N,"gid":N}` max configurable (default 1MB) |
 | GET | `/servers/{name}/backups` | Yes | List available `.tar.zst` backups |
-| POST | `/servers/{name}/backups` | Yes | Trigger async backup; returns backup ID |
+| POST | `/servers/{name}/backups` | Yes | Trigger async backup `{"uid":N,"gid":N}` (optional); returns backup ID |
 | GET | `/servers/{name}/backups/{backupID}` | Yes | Backup status/details |
-| POST | `/servers/{name}/restore` | Yes | Restore from backup `{"backup_id":"..."}` |
+| POST | `/servers/{name}/restore` | Yes | Restore from backup `{"backup_id":"...","uid":N,"gid":N}` |
 | POST | `/servers/{name}/migrate` | Yes | Rename server `{"new_name":"..."}` |
 | POST | `/servers/{name}/rcon` | Yes | Send RCON command `{"command":"..."}` |
 | POST | `/servers/{name}/rcon/op` | Yes | Op player `{"player":"..."}` |

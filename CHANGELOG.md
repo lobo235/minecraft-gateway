@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.1.4] - 2026-03-26
+
+### Fixed
+- All directories and files created under the NFS base path are now chowned to the correct uid:gid via new `mkdirAllOwned` helper
+- `runDownload` destination directories are chowned before file writes (fixes "permission denied" on modpack downloads)
+- `WriteFile` parent directories are chowned to match the file's uid:gid
+- `MoveFile` destination parent directories are chowned to uid:gid
+- `Restore` now chowns all extracted files to uid:gid after extraction
+- `StartBackup` backup directory and archive file are chowned to uid:gid
+
+### Changed
+- `StartBackup` API accepts optional `uid`/`gid` in request body
+- `Restore` API accepts `uid`/`gid` in request body
+- `MoveFile` accepts `uid`/`gid` parameters
+
 ## [v1.1.1] - 2026-03-24
 
 ### Fixed

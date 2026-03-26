@@ -41,11 +41,13 @@ type Client interface {
 	// ListBackups returns available backups for a server.
 	ListBackups(serverName string) ([]BackupInfo, error)
 	// StartBackup triggers an async backup, returning the backup ID.
-	StartBackup(serverName string) (string, error)
+	// All created files/dirs are chowned to uid:gid.
+	StartBackup(serverName string, uid, gid int) (string, error)
 	// GetBackupStatus returns the status of a backup by ID.
 	GetBackupStatus(serverName, backupID string) (*BackupStatus, error)
 	// Restore restores a server from a backup.
-	Restore(serverName, backupID string) error
+	// All extracted files are chowned to uid:gid.
+	Restore(serverName, backupID string, uid, gid int) error
 	// Migrate renames a server directory.
 	Migrate(serverName, newName string) error
 	// StartDownload triggers an async file download, returning a download ID.
@@ -60,7 +62,8 @@ type Client interface {
 	// WriteFile writes content to a file on the server filesystem, creating parent dirs as needed.
 	WriteFile(serverName, path, content string, uid, gid int) error
 	// MoveFile moves/renames a file or directory within a server's filesystem.
-	MoveFile(serverName, srcPath, dstPath string) error
+	// Parent directories are chowned to uid:gid.
+	MoveFile(serverName, srcPath, dstPath string, uid, gid int) error
 	// MaxWriteFileSize returns the configured maximum write file size.
 	MaxWriteFileSize() int64
 }
@@ -430,7 +433,7 @@ func (c *client) ListBackups(serverName string) ([]BackupInfo, error) {
 }
 
 // StartBackup triggers an async backup using pzstd, returning immediately with a backup ID.
-func (c *client) StartBackup(serverName string) (string, error) {
+func (c *client) StartBackup(serverName string, uid, gid int) (string, error) {
 	serverDir, err := c.SafePath(serverName)
 	if err != nil {
 		return "", err
@@ -443,7 +446,7 @@ func (c *client) StartBackup(serverName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := mkdirAllOwned(backupDir, 0755, uid, gid); err != nil {
 		return "", fmt.Errorf("create backup dir: %w", err)
 	}
 
@@ -460,12 +463,12 @@ func (c *client) StartBackup(serverName string) (string, error) {
 		return "", fmt.Errorf("write backup status: %w", err)
 	}
 
-	go c.runBackup(serverName, serverDir, backupFile, id)
+	go c.runBackup(serverName, serverDir, backupFile, id, uid, gid)
 
 	return id, nil
 }
 
-func (c *client) runBackup(serverName, serverDir, backupFile, id string) {
+func (c *client) runBackup(serverName, serverDir, backupFile, id string, uid, gid int) {
 	// Pipe tar output through pzstd without using sh -c to avoid shell injection.
 	tarCmd := exec.Command("tar", "--exclude="+backupsDir, "-cf", "-", "-C", serverDir, ".")
 	pzstdCmd := exec.Command("pzstd", "-o", backupFile)
@@ -495,6 +498,10 @@ func (c *client) runBackup(serverName, serverDir, backupFile, id string) {
 		c.log.Error("pzstd failed", "server", serverName, "id", id, "error", err)
 		c.writeBackupStatusDirect(serverName, id, "failed", "", err.Error())
 		return
+	}
+
+	if err := os.Chown(backupFile, uid, gid); err != nil {
+		c.log.Warn("chown backup file failed", "server", serverName, "id", id, "error", err)
 	}
 
 	c.log.Info("backup completed", "server", serverName, "id", id, "path", backupFile)
@@ -555,7 +562,7 @@ func (c *client) GetBackupStatus(serverName, backupID string) (*BackupStatus, er
 }
 
 // Restore extracts a backup archive into the server directory.
-func (c *client) Restore(serverName, backupID string) error {
+func (c *client) Restore(serverName, backupID string, uid, gid int) error {
 	if !backupIDRegex.MatchString(backupID) {
 		return fmt.Errorf("invalid backup ID: %s", backupID)
 	}
@@ -591,6 +598,11 @@ func (c *client) Restore(serverName, backupID string) error {
 
 	if err = tarCmd.Wait(); err != nil {
 		return fmt.Errorf("tar extract: %w", err)
+	}
+
+	// Chown all restored files to the correct owner.
+	if err := chownRecursive(serverDir, uid, gid); err != nil {
+		return fmt.Errorf("chown restored files: %w", err)
 	}
 	return nil
 }
@@ -666,7 +678,7 @@ func (c *client) StartDownload(serverName, rawURL, destPath string, extract bool
 func (c *client) runDownload(serverName, rawURL, dest string, extract bool, uid, gid int, mode DownloadMode, downloadID string) {
 	// Handle clean_first mode: remove all contents in dest before downloading.
 	if mode == ModeCleanFirst {
-		if err := os.MkdirAll(dest, 0755); err != nil {
+		if err := mkdirAllOwned(dest, 0755, uid, gid); err != nil {
 			c.log.Error("download clean_first mkdir failed", "server", serverName, "id", downloadID, "error", err)
 			c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
 			return
@@ -687,7 +699,7 @@ func (c *client) runDownload(serverName, rawURL, dest string, extract bool, uid,
 	}
 
 	// Ensure destination directory exists.
-	if err := os.MkdirAll(dest, 0755); err != nil {
+	if err := mkdirAllOwned(dest, 0755, uid, gid); err != nil {
 		c.log.Error("download mkdir failed", "server", serverName, "id", downloadID, "error", err)
 		c.writeDownloadStatusDirect(serverName, downloadID, "failed", nil, err.Error())
 		return
@@ -1276,8 +1288,8 @@ func (c *client) WriteFile(serverName, filePath, content string, uid, gid int) e
 		return err
 	}
 
-	// Create parent directories as needed.
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+	// Create parent directories as needed with correct ownership.
+	if err := mkdirAllOwned(filepath.Dir(fullPath), 0755, uid, gid); err != nil {
 		return fmt.Errorf("create parent dirs: %w", err)
 	}
 
@@ -1293,7 +1305,7 @@ func (c *client) WriteFile(serverName, filePath, content string, uid, gid int) e
 }
 
 // MoveFile moves/renames a file or directory within a server's filesystem.
-func (c *client) MoveFile(serverName, srcPath, dstPath string) error {
+func (c *client) MoveFile(serverName, srcPath, dstPath string, uid, gid int) error {
 	src, err := c.SafePath(serverName, srcPath)
 	if err != nil {
 		return err
@@ -1307,12 +1319,47 @@ func (c *client) MoveFile(serverName, srcPath, dstPath string) error {
 		return fmt.Errorf("source not found: %s", srcPath)
 	}
 
-	// Create parent directory of destination.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	// Create parent directory of destination with correct ownership.
+	if err := mkdirAllOwned(filepath.Dir(dst), 0755, uid, gid); err != nil {
 		return fmt.Errorf("create dest parent: %w", err)
 	}
 
 	return os.Rename(src, dst)
+}
+
+// mkdirAllOwned creates a directory path (like os.MkdirAll) and chowns only the
+// newly-created segments to uid:gid. Pre-existing ancestor directories are left untouched.
+func mkdirAllOwned(path string, perm os.FileMode, uid, gid int) error {
+	// Walk upward to find the deepest existing ancestor.
+	var newSegments []string
+	p := path
+	for {
+		_, err := os.Stat(p)
+		if err == nil {
+			break // p exists
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %q: %w", p, err)
+		}
+		newSegments = append(newSegments, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break // reached root
+		}
+		p = parent
+	}
+
+	if err := os.MkdirAll(path, perm); err != nil {
+		return err
+	}
+
+	// Chown the newly created directories (deepest ancestor first).
+	for i := len(newSegments) - 1; i >= 0; i-- {
+		if err := os.Chown(newSegments[i], uid, gid); err != nil {
+			return fmt.Errorf("chown %q: %w", newSegments[i], err)
+		}
+	}
+	return nil
 }
 
 // chownRecursive sets ownership of all files and directories under root to uid:gid.

@@ -512,7 +512,7 @@ func TestRestore_InvalidBackupID(t *testing.T) {
 	c, base := newTestClient(t)
 	os.MkdirAll(filepath.Join(base, "myserver"), 0755)
 
-	err := c.Restore("myserver", "../../etc/passwd")
+	err := c.Restore("myserver", "../../etc/passwd", os.Getuid(), os.Getgid())
 	if err == nil {
 		t.Fatal("expected error for invalid backup ID")
 	}
@@ -545,7 +545,7 @@ func TestRestore_BackupNotFound(t *testing.T) {
 	serverDir := filepath.Join(base, "myserver")
 	os.MkdirAll(filepath.Join(serverDir, "backups"), 0755)
 
-	err := c.Restore("myserver", "2026-01-01T00-00-00")
+	err := c.Restore("myserver", "2026-01-01T00-00-00", os.Getuid(), os.Getgid())
 	if err == nil {
 		t.Fatal("expected error for missing backup file")
 	}
@@ -654,7 +654,7 @@ func TestWriteBackupStatusDirect(t *testing.T) {
 
 func TestStartBackup_ServerNotFound(t *testing.T) {
 	c, _ := newTestClient(t)
-	_, err := c.StartBackup("nonexistent")
+	_, err := c.StartBackup("nonexistent", os.Getuid(), os.Getgid())
 	if err == nil {
 		t.Fatal("expected error for nonexistent server")
 	}
@@ -662,7 +662,7 @@ func TestStartBackup_ServerNotFound(t *testing.T) {
 
 func TestStartBackup_PathTraversal(t *testing.T) {
 	c, _ := newTestClient(t)
-	_, err := c.StartBackup("../escape")
+	_, err := c.StartBackup("../escape", os.Getuid(), os.Getgid())
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
 	}
@@ -675,7 +675,7 @@ func TestStartBackup_CreatesBackupDir(t *testing.T) {
 
 	// StartBackup will create the backups dir and launch a goroutine.
 	// The goroutine will fail (tar/pzstd likely not available), but we get the ID back.
-	id, err := c.StartBackup("myserver")
+	id, err := c.StartBackup("myserver", os.Getuid(), os.Getgid())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestStartBackup_CreatesBackupDir(t *testing.T) {
 
 func TestRestore_PathTraversal(t *testing.T) {
 	c, _ := newTestClient(t)
-	err := c.Restore("../escape", "2026-01-01T00-00-00")
+	err := c.Restore("../escape", "2026-01-01T00-00-00", os.Getuid(), os.Getgid())
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
 	}
@@ -785,7 +785,7 @@ func TestStartBackup_ExistingBackupsDir(t *testing.T) {
 	// Create a file so tar has something to archive.
 	os.WriteFile(filepath.Join(serverDir, "world.dat"), []byte("test data"), 0644)
 
-	id, err := c.StartBackup("myserver")
+	id, err := c.StartBackup("myserver", os.Getuid(), os.Getgid())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -821,7 +821,7 @@ func TestRestore_PzstdNotAvailable(t *testing.T) {
 	// Create a fake backup file so the os.Stat check passes.
 	os.WriteFile(filepath.Join(backupDir, "2026-01-01T00-00-00.tar.zst"), []byte("fake"), 0644)
 
-	err := c.Restore("myserver", "2026-01-01T00-00-00")
+	err := c.Restore("myserver", "2026-01-01T00-00-00", os.Getuid(), os.Getgid())
 	// This will fail because pzstd is not installed, but it exercises the pipe setup code.
 	if err == nil {
 		t.Log("restore succeeded (pzstd available); skipping error check")
@@ -834,7 +834,7 @@ func TestRestore_PzstdNotAvailable(t *testing.T) {
 func TestRestore_ServerPathTraversal(t *testing.T) {
 	c, _ := newTestClient(t)
 	// Server name causes path traversal.
-	err := c.Restore("/etc", "2026-01-01T00-00-00")
+	err := c.Restore("/etc", "2026-01-01T00-00-00", os.Getuid(), os.Getgid())
 	if err != ErrPathTraversal {
 		t.Errorf("expected ErrPathTraversal, got %v", err)
 	}
