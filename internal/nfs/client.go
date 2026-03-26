@@ -260,8 +260,10 @@ func (c *client) CreateServer(name string, uid, gid int) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create server dir: %w", err)
 	}
+	// Best-effort chown — non-root processes can't chown to other users.
+	// The directory will be owned by the gateway's UID (1001) which matches the MC server UID.
 	if err := os.Chown(dir, uid, gid); err != nil {
-		return fmt.Errorf("chown server dir: %w", err)
+		c.log.Warn("chown server dir skipped (non-root)", "dir", name, "uid", uid, "gid", gid)
 	}
 	// Create backups subdirectory.
 	backupDir := filepath.Join(dir, backupsDir)
@@ -269,7 +271,7 @@ func (c *client) CreateServer(name string, uid, gid int) error {
 		return fmt.Errorf("create backup dir: %w", err)
 	}
 	if err := os.Chown(backupDir, uid, gid); err != nil {
-		return fmt.Errorf("chown backup dir: %w", err)
+		c.log.Warn("chown backup dir skipped (non-root)", "dir", name, "uid", uid, "gid", gid)
 	}
 	return nil
 }
