@@ -7,13 +7,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lobo235/minecraft-gateway/internal/nfs"
 	"github.com/lobo235/minecraft-gateway/internal/rcon"
 )
 
 // Server holds the dependencies for the HTTP server.
 type Server struct {
-	nfs     nfs.Client
 	rcon    rcon.Client
 	apiKey  string
 	log     *slog.Logger
@@ -21,9 +19,8 @@ type Server struct {
 }
 
 // NewServer creates a Server wired with the given clients, API key, version string, and logger.
-func NewServer(nfsClient nfs.Client, rconClient rcon.Client, apiKey, version string, log *slog.Logger) *Server {
+func NewServer(rconClient rcon.Client, apiKey, version string, log *slog.Logger) *Server {
 	return &Server{
-		nfs:     nfsClient,
 		rcon:    rconClient,
 		apiKey:  apiKey,
 		log:     log,
@@ -39,38 +36,6 @@ func (s *Server) Handler() http.Handler {
 
 	// /health is unauthenticated — used by Nomad container health checks.
 	mux.HandleFunc("GET /health", s.healthHandler())
-
-	// Server management.
-	mux.Handle("GET /servers", auth(http.HandlerFunc(s.listServersHandler())))
-	mux.Handle("POST /servers", auth(http.HandlerFunc(s.createServerHandler())))
-	mux.Handle("DELETE /servers/{name}", auth(http.HandlerFunc(s.deleteServerHandler())))
-
-	// File download.
-	mux.Handle("POST /servers/{name}/download", auth(http.HandlerFunc(s.downloadHandler())))
-	mux.Handle("GET /servers/{name}/downloads/{downloadID}", auth(http.HandlerFunc(s.getDownloadStatusHandler())))
-
-	// Archive contents.
-	mux.Handle("GET /servers/{name}/archive-contents", auth(http.HandlerFunc(s.archiveContentsHandler())))
-
-	// Disk usage.
-	mux.Handle("GET /servers/{name}/disk-usage", auth(http.HandlerFunc(s.diskUsageHandler())))
-
-	// File operations.
-	mux.Handle("GET /servers/{name}/files", auth(http.HandlerFunc(s.listFilesHandler())))
-	mux.Handle("GET /servers/{name}/files/read", auth(http.HandlerFunc(s.readFileHandler())))
-	mux.Handle("GET /servers/{name}/files/grep", auth(http.HandlerFunc(s.grepFilesHandler())))
-	mux.Handle("POST /servers/{name}/files/write", auth(http.HandlerFunc(s.writeFileHandler())))
-	mux.Handle("POST /servers/{name}/files/move", auth(http.HandlerFunc(s.moveFileHandler())))
-	mux.Handle("DELETE /servers/{name}/files/delete", auth(http.HandlerFunc(s.deleteFileHandler())))
-
-	// Backup operations.
-	mux.Handle("GET /servers/{name}/backups", auth(http.HandlerFunc(s.listBackupsHandler())))
-	mux.Handle("POST /servers/{name}/backups", auth(http.HandlerFunc(s.startBackupHandler())))
-	mux.Handle("GET /servers/{name}/backups/{backupID}", auth(http.HandlerFunc(s.getBackupStatusHandler())))
-
-	// Restore and migrate.
-	mux.Handle("POST /servers/{name}/restore", auth(http.HandlerFunc(s.restoreHandler())))
-	mux.Handle("POST /servers/{name}/migrate", auth(http.HandlerFunc(s.migrateHandler())))
 
 	// RCON operations.
 	mux.Handle("POST /servers/{name}/rcon", auth(http.HandlerFunc(s.rconHandler())))

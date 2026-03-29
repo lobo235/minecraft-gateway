@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- All filesystem operations (directory CRUD, file CRUD, downloads, archives, disk usage) — extracted to filesystem-gateway
+- NFS client package
+- Backup and restore operations — extracted to filesystem-gateway
+- Download URL whitelist validation
+- NFS_BASE_PATH, DATA_DIR, MAX_DOWNLOAD_SIZE, MAX_WRITE_FILE_SIZE, MAX_EXTRACT_SIZE config vars
+- pzstd runtime dependency
+
+### Changed
+- Service now handles RCON operations only (5 routes + health)
+- Simplified configuration: only gateway URLs/keys, API key, port, and log level
+- Smaller Docker image (no zstd package)
+
 ## [v1.1.4] - 2026-03-26
 
 ### Fixed

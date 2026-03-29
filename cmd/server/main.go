@@ -9,7 +9,6 @@ import (
 
 	"github.com/lobo235/minecraft-gateway/internal/api"
 	"github.com/lobo235/minecraft-gateway/internal/config"
-	"github.com/lobo235/minecraft-gateway/internal/nfs"
 	"github.com/lobo235/minecraft-gateway/internal/nomadgw"
 	"github.com/lobo235/minecraft-gateway/internal/rcon"
 	"github.com/lobo235/minecraft-gateway/internal/vaultgw"
@@ -44,12 +43,11 @@ func main() {
 
 	log.Info("starting minecraft-gateway", "version", version, "log_level", cfg.LogLevel)
 
-	nfsClient := nfs.NewClient(cfg.NFSBasePath, cfg.DataDir, log, cfg.MaxDownloadSize, cfg.MaxWriteFileSize, cfg.MaxExtractSize)
 	nomadClient := nomadgw.NewClient(cfg.NomadGatewayURL, cfg.NomadGatewayKey, log)
 	vaultClient := vaultgw.NewClient(cfg.VaultGatewayURL, cfg.VaultGatewayKey, log)
 	rconClient := rcon.NewClient(nomadClient, vaultClient, log)
 
-	srv := api.NewServer(nfsClient, rconClient, cfg.GatewayAPIKey, version, log)
+	srv := api.NewServer(rconClient, cfg.GatewayAPIKey, version, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

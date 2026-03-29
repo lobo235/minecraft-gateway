@@ -55,10 +55,6 @@ job "minecraft-gateway" {
       config {
         image = "ghcr.io/lobo235/minecraft-gateway:latest"
         ports = ["http"]
-        volumes = [
-          "/path/to/minecraft:/mnt/minecraft",
-          "/path/to/data:/data",
-        ]
       }
 
       template {
@@ -76,8 +72,6 @@ EOF
       env {
         PORT              = "8080"
         LOG_LEVEL         = "info"
-        NFS_BASE_PATH     = "/mnt/minecraft"
-        DATA_DIR          = "/data"
         NOMAD_GATEWAY_URL = "https://nomad-gateway.example.com"
         VAULT_GATEWAY_URL = "https://vault-gateway.example.com"
       }

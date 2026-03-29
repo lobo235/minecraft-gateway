@@ -1,15 +1,13 @@
 # minecraft-gateway
 
-Authenticated HTTP API for Minecraft server filesystem management (NFS volume) and RCON command execution.
+Authenticated HTTP API for Minecraft server RCON command execution.
 Part of the [homelab-ai](https://github.com/lobo235/homelab-ai) platform.
 
 ## Features
 
-- **Server management:** Create, list, delete server directories on the NFS volume
-- **File operations:** List files, read files (1MB max), grep with pattern matching
-- **Backup system:** Async backups via pzstd compression, restore, status tracking
 - **RCON commands:** Execute arbitrary commands, op/deop players, whitelist management, player list
-- **Security:** Path traversal prevention, Bearer token authentication, X-Trace-ID correlation
+- **Security:** Bearer token authentication, X-Trace-ID correlation
+- **Upstream resolution:** Automatically resolves RCON host/port from nomad-gateway and password from vault-gateway
 
 ## Quick Start
 
@@ -44,24 +42,6 @@ All endpoints except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Health check (unauthenticated) |
-| GET | `/servers` | List server directories |
-| POST | `/servers` | Create server directory |
-| DELETE | `/servers/{name}` | Delete server directory |
-| POST | `/servers/{name}/download` | Download file to server (async) |
-| GET | `/servers/{name}/downloads/{id}` | Download status |
-| GET | `/servers/{name}/archive-contents` | List archive entries |
-| GET | `/servers/{name}/disk-usage` | Disk usage |
-| GET | `/servers/{name}/files` | List files |
-| GET | `/servers/{name}/files/read` | Read file |
-| GET | `/servers/{name}/files/grep` | Grep files |
-| POST | `/servers/{name}/files/write` | Write file |
-| POST | `/servers/{name}/files/move` | Move/rename file |
-| DELETE | `/servers/{name}/files/delete` | Delete file/directory |
-| GET | `/servers/{name}/backups` | List backups |
-| POST | `/servers/{name}/backups` | Start backup (async) |
-| GET | `/servers/{name}/backups/{id}` | Backup status |
-| POST | `/servers/{name}/restore` | Restore from backup |
-| POST | `/servers/{name}/migrate` | Rename server |
 | POST | `/servers/{name}/rcon` | Send RCON command |
 | POST | `/servers/{name}/rcon/op` | Op player |
 | POST | `/servers/{name}/rcon/deop` | Deop player |
@@ -72,7 +52,6 @@ All endpoints except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `NFS_BASE_PATH` | Yes | — | NFS volume base path |
 | `NOMAD_GATEWAY_URL` | Yes | — | nomad-gateway base URL |
 | `NOMAD_GATEWAY_KEY` | Yes | — | nomad-gateway API key |
 | `VAULT_GATEWAY_URL` | Yes | — | vault-gateway base URL |
@@ -80,7 +59,3 @@ All endpoints except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`
 | `GATEWAY_API_KEY` | Yes | — | Bearer token for callers |
 | `PORT` | No | `8080` | Listen port |
 | `LOG_LEVEL` | No | `info` | Log verbosity |
-| `DATA_DIR` | No | `/data` | Backup status file directory |
-| `MAX_DOWNLOAD_SIZE` | No | `2147483648` | Max download size in bytes (2GB) |
-| `MAX_WRITE_FILE_SIZE` | No | `1048576` | Max file write size in bytes (1MB) |
-| `MAX_EXTRACT_SIZE` | No | `10737418240` | Max extracted archive size in bytes (10GB) |

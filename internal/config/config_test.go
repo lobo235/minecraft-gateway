@@ -7,16 +7,15 @@ import (
 
 func clearEnv() {
 	for _, key := range []string{
-		"NFS_BASE_PATH", "NOMAD_GATEWAY_URL", "NOMAD_GATEWAY_KEY",
+		"NOMAD_GATEWAY_URL", "NOMAD_GATEWAY_KEY",
 		"VAULT_GATEWAY_URL", "VAULT_GATEWAY_KEY", "GATEWAY_API_KEY",
-		"PORT", "LOG_LEVEL", "DATA_DIR", "MAX_DOWNLOAD_SIZE", "MAX_WRITE_FILE_SIZE",
+		"PORT", "LOG_LEVEL",
 	} {
 		os.Unsetenv(key)
 	}
 }
 
 func setRequiredEnv() {
-	os.Setenv("NFS_BASE_PATH", "/mnt/data/minecraft")
 	os.Setenv("NOMAD_GATEWAY_URL", "http://localhost:8081")
 	os.Setenv("NOMAD_GATEWAY_KEY", "nomad-key")
 	os.Setenv("VAULT_GATEWAY_URL", "http://localhost:8082")
@@ -32,23 +31,11 @@ func TestLoadSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFSBasePath != "/mnt/data/minecraft" {
-		t.Errorf("NFSBasePath = %q, want /mnt/data/minecraft", cfg.NFSBasePath)
-	}
 	if cfg.Port != "8080" {
 		t.Errorf("Port = %q, want 8080", cfg.Port)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", cfg.LogLevel)
-	}
-	if cfg.DataDir != "/data" {
-		t.Errorf("DataDir = %q, want /data", cfg.DataDir)
-	}
-	if cfg.MaxDownloadSize != 2147483648 {
-		t.Errorf("MaxDownloadSize = %d, want 2147483648", cfg.MaxDownloadSize)
-	}
-	if cfg.MaxWriteFileSize != 1048576 {
-		t.Errorf("MaxWriteFileSize = %d, want 1048576", cfg.MaxWriteFileSize)
 	}
 }
 
@@ -58,7 +45,6 @@ func TestLoadMissingRequired(t *testing.T) {
 		unset  string
 		errMsg string
 	}{
-		{"missing NFS_BASE_PATH", "NFS_BASE_PATH", "NFS_BASE_PATH is required"},
 		{"missing NOMAD_GATEWAY_URL", "NOMAD_GATEWAY_URL", "NOMAD_GATEWAY_URL is required"},
 		{"missing NOMAD_GATEWAY_KEY", "NOMAD_GATEWAY_KEY", "NOMAD_GATEWAY_KEY is required"},
 		{"missing VAULT_GATEWAY_URL", "VAULT_GATEWAY_URL", "VAULT_GATEWAY_URL is required"},
@@ -99,7 +85,6 @@ func TestLoadCustomValues(t *testing.T) {
 	setRequiredEnv()
 	os.Setenv("PORT", "9090")
 	os.Setenv("LOG_LEVEL", "debug")
-	os.Setenv("DATA_DIR", "/custom/data")
 
 	cfg, err := Load()
 	if err != nil {
@@ -110,80 +95,5 @@ func TestLoadCustomValues(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want debug", cfg.LogLevel)
-	}
-	if cfg.DataDir != "/custom/data" {
-		t.Errorf("DataDir = %q, want /custom/data", cfg.DataDir)
-	}
-}
-
-func TestLoadCustomMaxDownloadSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_DOWNLOAD_SIZE", "4294967296")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.MaxDownloadSize != 4294967296 {
-		t.Errorf("MaxDownloadSize = %d, want 4294967296", cfg.MaxDownloadSize)
-	}
-}
-
-func TestLoadCustomMaxWriteFileSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_WRITE_FILE_SIZE", "2097152")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.MaxWriteFileSize != 2097152 {
-		t.Errorf("MaxWriteFileSize = %d, want 2097152", cfg.MaxWriteFileSize)
-	}
-}
-
-func TestLoadInvalidMaxDownloadSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_DOWNLOAD_SIZE", "not-a-number")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid MAX_DOWNLOAD_SIZE")
-	}
-}
-
-func TestLoadInvalidMaxWriteFileSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_WRITE_FILE_SIZE", "not-a-number")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid MAX_WRITE_FILE_SIZE")
-	}
-}
-
-func TestLoadZeroMaxDownloadSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_DOWNLOAD_SIZE", "0")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for zero MAX_DOWNLOAD_SIZE")
-	}
-}
-
-func TestLoadNegativeMaxWriteFileSize(t *testing.T) {
-	clearEnv()
-	setRequiredEnv()
-	os.Setenv("MAX_WRITE_FILE_SIZE", "-1")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for negative MAX_WRITE_FILE_SIZE")
 	}
 }

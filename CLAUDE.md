@@ -1,6 +1,6 @@
 # minecraft-gateway
 
-Authenticated HTTP API for Minecraft server filesystem management (NFS volume) and RCON command execution.
+Authenticated HTTP API for Minecraft server RCON command execution.
 Part of the [homelab-ai](https://github.com/lobo235/homelab-ai) platform.
 
 ## Module
@@ -65,9 +65,6 @@ minecraft-gateway/
 └── internal/
     ├── config/
     │   └── config.go         # ENV var loading & validation
-    ├── nfs/
-    │   ├── client.go         # NFS filesystem operations (path traversal prevention)
-    │   └── client_test.go    # unit tests (path traversal, CRUD, backup/restore)
     ├── nomadgw/
     │   ├── client.go         # nomad-gateway HTTP client (allocation resolution)
     │   └── client_test.go
@@ -79,7 +76,7 @@ minecraft-gateway/
     └── api/
         ├── server.go         # HTTP mux + Run()
         ├── middleware.go     # Bearer auth + request logging + X-Trace-ID
-        ├── handlers.go       # all route handlers
+        ├── handlers.go       # RCON route handlers
         ├── validate.go       # input validation (server names, player names)
         ├── errors.go         # writeError / writeJSON helpers
         └── health.go         # GET /health (unauthenticated)
@@ -91,7 +88,6 @@ All config via ENV vars. Loaded from `.env` in development (via `godotenv`; miss
 
 | Var | Required | Default | Purpose |
 |-----|----------|---------|---------|
-| `NFS_BASE_PATH` | yes | — | Base path for server data on NFS (e.g. `/mnt/data/minecraft`) |
 | `NOMAD_GATEWAY_URL` | yes | — | Base URL of nomad-gateway (RCON allocation resolution) |
 | `NOMAD_GATEWAY_KEY` | yes | — | API key for nomad-gateway |
 | `VAULT_GATEWAY_URL` | yes | — | Base URL of vault-gateway (RCON password retrieval) |
@@ -99,10 +95,6 @@ All config via ENV vars. Loaded from `.env` in development (via `godotenv`; miss
 | `GATEWAY_API_KEY` | yes | — | Bearer token for callers of this API |
 | `PORT` | no | `8080` | Listen port |
 | `LOG_LEVEL` | no | `info` | Verbosity: `debug`, `info`, `warn`, `error` |
-| `DATA_DIR` | no | `/data` | Directory for `.backup-status` tracking files |
-| `MAX_DOWNLOAD_SIZE` | no | `2147483648` | Max download size in bytes (2GB default) |
-| `MAX_WRITE_FILE_SIZE` | no | `1048576` | Max file write size in bytes (1MB default) |
-| `MAX_EXTRACT_SIZE` | no | `10737418240` | Max total extracted archive size in bytes (10GB default) |
 
 ## Architecture
 
@@ -111,11 +103,10 @@ cmd/server/main.go              — entry point, wires deps, handles SIGINT/SIGT
 internal/config/config.go       — ENV-based config with validation
 internal/api/server.go          — HTTP server, route registration
 internal/api/middleware.go      — bearerAuth + requestLogger + X-Trace-ID propagation
-internal/api/handlers.go        — route handlers (servers, files, backups, RCON)
+internal/api/handlers.go        — RCON route handlers
 internal/api/validate.go        — input validation (server names, player names)
 internal/api/errors.go          — writeError / writeJSON helpers
 internal/api/health.go          — GET /health handler (unauthenticated)
-internal/nfs/client.go          — NFS filesystem client (path traversal prevention, CRUD, backups)
 internal/nomadgw/client.go      — nomad-gateway HTTP client (allocation resolution for RCON)
 internal/vaultgw/client.go      — vault-gateway HTTP client (RCON password retrieval)
 internal/rcon/client.go         — RCON client (resolves connection from upstreams, uses gorcon/rcon)
@@ -126,12 +117,6 @@ internal/rcon/client.go         — RCON client (resolves connection from upstre
 2. Calls vault-gateway `GET /secrets/minecraft/{name}` to retrieve the RCON password
 3. Connects via gorcon/rcon and executes the command
 
-**Backup flow:** `POST /servers/{name}/backups` triggers an async backup using pzstd (parallel zstd). Returns immediately with a backup ID. Status tracked in `.backup-status` JSON files at `DATA_DIR/<server-name>.backup-status`. Files stored at `<NFS_BASE_PATH>/<server>/backups/<id>.tar.zst`.
-
-**Download flow:** `POST /servers/{name}/download` triggers an async download. Returns immediately with a download ID and status "running" (201 Created). Status tracked in `.download-<id>.status` JSON files at `DATA_DIR/<server-name>.download-<id>.status`. Poll `GET /servers/{name}/downloads/{id}` for completion. Status includes result (files_count, total_bytes) on success, or error message on failure.
-
-**Restore sequencing:** `POST /servers/{name}/restore` performs NO liveness check — it always attempts the restore. The MCP server orchestration layer is responsible for stopping the server before restore and restarting it afterward. If restore runs while the server is live, the JVM will overwrite restored data on the next autosave, causing silent data loss.
-
 ## API Routes
 
 All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
@@ -139,22 +124,6 @@ All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | No | Returns `{"status":"ok","version":"..."}` |
-| GET | `/servers` | Yes | List server directories on NFS volume |
-| POST | `/servers` | Yes | Create server dir `{"name":"...","uid":N,"gid":N}` |
-| DELETE | `/servers/{name}` | Yes | Delete server dir (requires `?confirm=true`) |
-| POST | `/servers/{name}/download` | Yes | Start async download `{"url":"...","dest_path":"...","extract":bool,"uid":N,"gid":N,"mode":"overwrite\|skip_existing\|clean_first"}` returns 201 with `{"id":"...","status":"running"}` |
-| GET | `/servers/{name}/downloads/{downloadID}` | Yes | Download status/details |
-| GET | `/servers/{name}/archive-contents` | Yes | List archive entries (`?path=mods.zip`) supports .zip, .tar.gz, .tar.zst |
-| GET | `/servers/{name}/disk-usage` | Yes | Disk usage in bytes |
-| GET | `/servers/{name}/files` | Yes | List files (`?path=subdir`) |
-| GET | `/servers/{name}/files/read` | Yes | Read file (`?path=logs/latest.log`) max 1MB |
-| GET | `/servers/{name}/files/grep` | Yes | Grep (`?path=...&pattern=...`) max 10k lines/5MB |
-| POST | `/servers/{name}/files/write` | Yes | Write file `{"path":"...","content":"...","uid":N,"gid":N}` max configurable (default 1MB) |
-| GET | `/servers/{name}/backups` | Yes | List available `.tar.zst` backups |
-| POST | `/servers/{name}/backups` | Yes | Trigger async backup `{"uid":N,"gid":N}` (optional); returns backup ID |
-| GET | `/servers/{name}/backups/{backupID}` | Yes | Backup status/details |
-| POST | `/servers/{name}/restore` | Yes | Restore from backup `{"backup_id":"...","uid":N,"gid":N}` |
-| POST | `/servers/{name}/migrate` | Yes | Rename server `{"new_name":"..."}` |
 | POST | `/servers/{name}/rcon` | Yes | Send RCON command `{"command":"..."}` |
 | POST | `/servers/{name}/rcon/op` | Yes | Op player `{"player":"..."}` |
 | POST | `/servers/{name}/rcon/deop` | Yes | Deop player `{"player":"..."}` |
@@ -166,27 +135,21 @@ All routes except `/health` require `Authorization: Bearer <GATEWAY_API_KEY>`.
 - **Server names:** `^[a-z0-9][a-z0-9-]{0,47}$`
 - **Player names:** `^[a-zA-Z0-9_]{1,16}$`
 
-### Path Traversal Prevention
-
-All path parameters are resolved via `filepath.Abs()` and verified to have `NFS_BASE_PATH` as a prefix before any filesystem operation. Requests with `../` sequences, absolute paths outside the base, or URL-encoded traversal sequences are rejected with HTTP 400 and code `path_traversal`.
-
 ## Testing Approach
 
 Tests use `httptest.NewServer` to mock upstream HTTP APIs (nomad-gateway, vault-gateway) — no live dependencies required.
 
 ```
-internal/nfs/client_test.go     — path traversal prevention, filesystem CRUD, backup operations
 internal/nomadgw/client_test.go — upstream client unit tests
 internal/vaultgw/client_test.go — upstream client unit tests
-internal/api/server_test.go     — handler tests via httptest (all endpoints)
+internal/api/server_test.go     — handler tests via httptest (all RCON endpoints)
 internal/config/config_test.go  — config loading and validation
 ```
 
 Key patterns:
 - Each test registers a mock endpoint, calls the client/handler, asserts return value and that mock was hit
-- Table-driven tests for input validation (server names, player names, path traversal)
+- Table-driven tests for input validation (server names, player names)
 - Test both success paths and error paths (upstream 4xx, 5xx, network error)
-- **Path traversal tests are mandatory:** `../`, `../../`, absolute paths, URL-encoded `%2e%2e%2f`
 
 ## Coding Conventions
 
@@ -243,13 +206,9 @@ docker build --build-arg VERSION=v1.2.3 -t minecraft-gateway .
 docker run --env-file .env -p 8080:8080 minecraft-gateway
 ```
 
-Multi-stage build: `golang:1.24-alpine` → `alpine:3.21`. Statically compiled (`CGO_ENABLED=0`). Runtime image includes `zstd` package for pzstd backup compression.
+Multi-stage build: `golang:1.24-alpine` -> `alpine:3.21`. Statically compiled (`CGO_ENABLED=0`). Minimal runtime image with only `ca-certificates`.
 
 ## Known Limitations
 
-- **Restore requires server stop:** `POST /servers/{name}/restore` does not check server liveness. If the Minecraft server is running during restore, the JVM will overwrite restored world data on the next autosave, causing silent data loss. The MCP server must stop the Nomad job before calling restore.
-- **Single backup status per server:** Only the most recent backup status is tracked per server in the `.backup-status` file. Starting a new backup overwrites the previous status.
-- **Backup timestamp IDs:** Backup IDs use second-precision UTC timestamps (`2006-01-02T15-04-05`). Starting two backups for the same server within the same second will collide.
-- **pzstd required at runtime:** The `pzstd` binary must be available in `PATH` for backup/restore operations. The Dockerfile includes it via `apk add zstd`.
-- **Download timestamp IDs:** Download IDs use second-precision UTC timestamps (`2006-01-02T15-04-05`). Starting two downloads for the same server within the same second will collide.
-- **Download status files are per-download:** Each download creates its own status file (`<server>.download-<id>.status`), unlike backups which overwrite a single status file per server.
+- **RCON requires running server:** RCON commands fail with 404 if no running Nomad allocation is found for the target server.
+- **Single RCON connection per request:** Each RCON command opens a new connection. There is no connection pooling.
